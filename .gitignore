@@ -1,0 +1,14 @@
+# Docker Compose environment (contains local DB credentials) — never commit.
+/.env
+
+# IDE / tool-local configuration.
+.claude/settings.local.json
+.vscode/
+.idea/
+
+# OS cruft.
+.DS_Store
+Thumbs.db
+
+# backend/ and frontend/ each carry their own .gitignore (vendor/,
+# node_modules/, backend/.env, storage/logs, etc.) — not duplicated here.

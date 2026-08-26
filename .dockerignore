@@ -1,0 +1,13 @@
+.git
+.gitignore
+docs/
+*.md
+
+backend/vendor
+backend/node_modules
+backend/storage/logs
+backend/.env
+
+frontend/node_modules
+frontend/dist
+frontend/.env
