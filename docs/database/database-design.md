@@ -1,9 +1,23 @@
 # Database Design
 
-**Status: Database Design 2.2 — APPROVED.** Version 2.0 was a major upgrade from the original MVP schema, expanding the catalog into a proper product/variant model and adding customer addresses, saved Stripe payment methods, and a corrected inventory idempotency key; its one remaining open decision (PRD.md §7.1 "Payment Status" vs. "Order Status") was resolved — see "Order & Payment State Models — Authoritative Interaction Model" below. Version 2.1 added a `platform_admins` table and an organization approval/suspension lifecycle (`organizations.status` and related audit columns), establishing Platform Admin as a third identity domain structurally separate from the Organization → Store → merchant-user hierarchy and from `customers`. **Version 2.2, approved 2026-08-26, removes `carts`/`cart_items` from the MySQL schema entirely** — for MVP, carts are intentionally ephemeral (guest: browser `localStorage`; authenticated: Redis, tenant/customer-namespaced, TTL'd) and are never persisted in MySQL; MySQL remains the durable source of truth beginning at the pending order, and checkout revalidates all cart contents against MySQL rather than trusting them. See "Cart Architecture" changelog entry near the former Cart section below, and `docs/architecture/system-architecture.md` for the full Redis/localStorage design. This document is authoritative for Phase 2 implementation — see `docs/development/project-status.md`.
+**Status: Database Design 2.5 — APPROVED.** Version 2.0 was a major upgrade from the original MVP schema, expanding the catalog into a proper product/variant model and adding customer addresses, saved Stripe payment methods, and a corrected inventory idempotency key; its one remaining open decision (PRD.md §7.1 "Payment Status" vs. "Order Status") was resolved — see "Order & Payment State Models — Authoritative Interaction Model" below. Version 2.1 added a `platform_admins` table and an organization approval/suspension lifecycle (`organizations.status` and related audit columns), establishing Platform Admin as a third identity domain structurally separate from the Organization → Store → merchant-user hierarchy and from `customers`. Version 2.2, approved 2026-08-26, removes `carts`/`cart_items` from the MySQL schema entirely — for MVP, carts are intentionally ephemeral (guest: browser `localStorage`; authenticated: Redis, tenant/customer-namespaced, TTL'd) and are never persisted in MySQL; MySQL remains the durable source of truth beginning at the pending order, and checkout revalidates all cart contents against MySQL rather than trusting them. See "Cart Architecture" changelog entry near the former Cart section below, and `docs/architecture/system-architecture.md` for the full Redis/localStorage design. Version 2.3, approved 2026-08-27, resolves three Phase 2C catalog design-review findings before any Phase 2C migration was written: `categories.deleted_at` documentation correction, the variant option-value cardinality application-layer invariant, and the product-soft-delete-vs-active-variants clarification. Version 2.4, approved 2026-08-27, resolves the Phase 2D Orders design review before any Phase 2D migration was written: no `orders.shipping_total` column, the `paid → cancelled` disallowed-transition invariant, the late-payment/inventory-oversell scenario deferred to Phase 2F, and the widened `orders` customer-history index. **Version 2.5, approved 2026-08-27, is a documentation-only reconciliation — not a new design decision** — bringing this document up to date with the already-implemented, already-verified Phase 2E `payments`/`refunds`/`stripe_webhook_events` migrations and the three decisions (I-1/I-2/I-3) approved during the Phase 2E design review: (1) `refunds` gains a full formal column table, replacing the prose-only description that was the only table in this entire document without one; (2) `payments.organization_id`/`store_id` gain an explicit `ON DELETE RESTRICT`, previously undocumented; (3) `stripe_webhook_events` gains a full formal column table with exact types/nullability, replacing a partially-detailed prose spec. See the Phase 2E Documentation Reconciliation changelog entry below. This document is authoritative for Phase 2 implementation — see `docs/development/project-status.md`.
 
 ## Changelog
 
+- **2.5 (2026-08-27) — Phase 2E Documentation Reconciliation (no schema change).** The Phase 2E migrations (`payment_methods`, `payments`, `refunds`, `stripe_webhook_events`) were already implemented and verified against Database Design 2.4 plus three decisions (I-1/I-2/I-3) approved during that phase's design review; this entry brings the document itself into agreement with what was actually approved and built, closing a real documentation gap rather than recording a new decision:
+  - **`refunds` formally specified.** Previously the only table in this document described only in prose, with no `|Column|Type|Notes|` table at all. Now fully specified: `organization_id`/`store_id`/`order_id`/`payment_id` (all `FK, not null, RESTRICT`), `initiated_by_user_id` (`FK → users, nullable, SET NULL`), `stripe_refund_id` (`varchar(255), unique`), `amount` (`decimal(10,2)`), `reason` (`varchar(255), nullable`), `status` (`varchar, default 'pending'`), indexes `(order_id, status)`/`(store_id, status)`.
+  - **`payments.organization_id`/`store_id` `ON DELETE` made explicit**: `RESTRICT`, matching the same convention already applied to every other top-level tenant-scoped table.
+  - **`stripe_webhook_events` formally specified.** Previously a compact prose list with no explicit varchar lengths or `processed_at` nullability. Now a full column table: `stripe_event_id`/`type` (`varchar(255), not null`), `processed_at` (`timestamp, not null`), `payload` (`json, nullable`), `created_at` only (no `updated_at`), no foreign keys.
+  - No columns, tables, constraints, or FK targets were added beyond what the Phase 2E migrations already implement — this is strictly a documentation correction, not a schema change. `orders` still has no `shipping_total`, `payment_status`, or `fulfillment_status` column; no provider-abstraction layer or additional Stripe-specific columns were introduced anywhere.
+- **2.4 (2026-08-27) — Phase 2D Orders Design Review resolutions.** Resolved before any Phase 2D migration was written, the same pattern as the Platform Admin, Cart, and Catalog corrections before their respective phases:
+  - **No `orders.shipping_total` column.** Confirmed, not added. PRD §7.1's authoritative order-field list (Subtotal/Discount/Tax/Total) omits shipping, and PRD §29 explicitly excludes Shipping Provider Integration from MVP scope. "Shipping information" in PRD §5.5's checkout summary refers to the shipping address (already captured by `order_addresses`), not a cost line. No schema change — this confirms the existing (unmodified since 2.0) `orders` schema is correct as-is.
+  - **`paid → cancelled` explicitly recorded as a disallowed transition.** Not a new rule — the state-transition table already implied it — but now stated as an explicit, named business invariant under "Order & Payment State Models" §3, since it constrains future Store Admin order-action UI (a paid-or-later order must be cancelled via the refund flow, never a direct "cancel" action).
+  - **Late-payment / inventory-oversell scenario recorded as a known, deferred Phase 2F decision.** Because Phase 2D creates `pending` orders with no inventory reservation, multiple pending orders can reference the same remaining stock; if a payment later succeeds against insufficient inventory, the exact webhook-level consequence (automatic refund vs. manual reconciliation, etc.) is explicitly **not** decided now. Documented under "Concurrency Review" and "Open Decisions" so it isn't lost before Phase 2F.
+  - **`orders`' customer-history index widened**: `(store_id, customer_id)` → `(store_id, customer_id, created_at)`, to support the customer `/orders` history query (newest-first) without a filesort, while preserving the same tenant/customer lookup prefix.
+- **2.3 (2026-08-27) — Phase 2C Catalog Design Review corrections.** Resolved before any Phase 2C migration was written, the same way the Platform Admin and Cart corrections preceded their respective phases:
+  - **`categories.deleted_at` added.** This was a documentation omission, not a design change: the "Rejected" note under `categories` and the "Soft-Delete Strategy" section both already stated/assumed `categories` is soft-deletable (`categories.slug` was already listed in the mutate-on-delete column list), but the `categories` column table itself never listed `deleted_at`. `categories` now formally has `deleted_at` (nullable timestamp) and follows the same mutate-on-delete `slug` pattern as `products`/`stores`. No `status` column was added — that was considered and re-confirmed as rejected.
+  - **Variant option-value cardinality documented as an application-layer invariant.** `product_variant_option_values`' own constraints prevent a duplicate link but not an invalid *set* (e.g. two "Color" values on one variant, or a missing required option). This is now explicitly documented under `product_variant_option_values` as a required service-layer rule, enforced atomically alongside `option_signature` recomputation — no schema change.
+  - **Product soft-delete vs. active variants/options clarified.** Soft-deleting a `product` is never blocked by active child `product_variants`/`product_options` — deliberately the opposite of the store-level blocking policy, since a product's variants/options are pure children with no independent visibility to protect. Documented under "Soft-Delete Strategy."
 - **2.2 (2026-08-26)** — Removed `carts`/`cart_items` MySQL tables. Cart state for MVP is ephemeral: guest carts live in browser `localStorage`; authenticated-customer carts live in Redis (tenant/customer-namespaced key, TTL'd, no MySQL persistence). Checkout treats cart contents as untrusted input — it revalidates `product_variant_id`/quantity and recalculates all prices/totals against MySQL, never trusting client-supplied values. No MySQL migration for `carts`/`cart_items` had been written yet (Phase 2D, not started), so this required no migration rollback — only a design-document and plan correction. Do not reintroduce a MySQL `carts`/`cart_items` table later without explicitly reconsidering and re-approving this architecture.
 - **2.1 (2026-08-26)** — Added `platform_admins` (third, structurally separate identity domain) and an organization approval/suspension lifecycle (`organizations.status` + audit columns).
 - **2.0** — Upgraded the original MVP schema into a product/variant model; added `customer_addresses`, `order_addresses`, `payment_methods`; corrected the inventory idempotency key.
@@ -169,8 +183,9 @@ This is the core of this revision. Structure: `Product → Options → Option Va
 | description | text | nullable — **added**, reasonable for a category landing page |
 | sort_order | int | not null, default 0 — **added**, storefront nav ordering |
 | created_at / updated_at | timestamp | |
+| deleted_at | timestamp | nullable — soft delete (mutate-on-delete, same pattern as `products`/`stores`; **documentation correction, 2.3** — this column was always intended, per the Soft-Delete Strategy section and the "Rejected" note below which both already assumed it, but was missing from this table's column list) |
 
-- Unique: `(store_id, slug)`
+- Unique: `(store_id, slug)` — survives soft-delete via the mutate-on-delete pattern: on soft delete, the application suffixes `slug` (e.g. `slug-deleted-{id}`), freeing the original value for reuse, exactly as done for `products.slug`/`stores.slug`. See "Soft-Delete Strategy" below.
 - **Rejected**: nested/tree categories (PRD's "Manage categories" doesn't describe hierarchy — flat list only, avoiding unneeded complexity) and a `status` column (categories already soft-delete; an independent active/inactive flag on top wasn't clearly justified the way it is for products' draft→active→archived catalog workflow).
 
 #### `product_options`
@@ -245,6 +260,13 @@ This is the core of this revision. Structure: `Product → Options → Option Va
 - Tenant scoping: none directly — pure pivot, child of `product_variants`.
 
 **Example** (matches the task's worked example): `T-Shirt` has `product_options` rows "Color" and "Size"; "Color" has `product_option_values` "Red"/"Blue", "Size" has "S"/"M"/"L". The variant `SKU-RED-M` is one `product_variants` row (`option_signature` = e.g. `"12,45"`) with two `product_variant_option_values` rows linking it to the "Red" and "M" option-value rows.
+
+**Application-layer invariant — option-value cardinality per variant (2.3, documented, not DB-enforced).** This pivot table's own constraints (`unique(product_variant_id, product_option_value_id)`, the CASCADE/RESTRICT pair above) prevent a *duplicate* link, but nothing at the schema level stops a variant from linking to two different values of the same option (e.g. both "Red" and "Blue"), or from omitting a value for an option the product defines. `option_signature`'s uniqueness constraint doesn't catch this either — it only prevents two variants from sharing the same (however malformed) set. The following is therefore a required **service-layer** rule, not a schema one:
+
+- For a given variant, at most one selected `product_option_value` per `product_option` it belongs to.
+- If the product defines one or more `product_options`, every variant must have exactly one selected value for each of those options — no option left unset.
+- A non-variable product's single "default" variant has zero option values (`option_signature = "default"`), which is the sole exception to "exactly one value per option."
+- This invariant must be validated and enforced **atomically together with** the `option_signature` recomputation, in the same service method/transaction that changes a variant's option-value links — a variant that passes this cardinality check but has a stale `option_signature` (or vice versa) is exactly the kind of drift both mechanisms exist to prevent.
 
 #### `product_images`
 *Source of truth.*
@@ -357,7 +379,8 @@ Full architectural detail — server-derived key namespacing, TTL, the intended 
 | created_at / updated_at | timestamp | |
 
 - Unique: `order_number`
-- Indexes: `(store_id, status, created_at)`, `(store_id, customer_id)`, `(organization_id, created_at)`
+- Indexes: `(store_id, status, created_at)`, `(store_id, customer_id, created_at)` **(widened in 2.4 — was `(store_id, customer_id)`; `created_at` added to support the customer `/orders` history query sorted newest-first without a filesort, same tenant/customer lookup prefix preserved)**, `(organization_id, created_at)`
+- **No `shipping_total` column (confirmed, 2.4).** PRD §7.1's authoritative order-field list (Subtotal/Discount/Tax/Total) omits shipping, and PRD §29 explicitly excludes Shipping Provider Integration from MVP. "Shipping information" in PRD §5.5's checkout summary refers to the shipping *address* — already captured by `order_addresses` below — not a cost line. This was explicitly considered and rejected during the Phase 2D design review, not merely absent by oversight.
 
 #### `order_addresses`
 *Immutable historical snapshot.* Copied from a `customer_addresses` row at checkout time; never changes afterward even if the source address later does.
@@ -415,23 +438,48 @@ Full architectural detail — server-derived key namespacing, TTL, the intended 
 | Column | Type | Notes |
 |---|---|---|
 | id | bigint unsigned | PK |
-| organization_id | bigint unsigned | FK → organizations.id, not null |
-| store_id | bigint unsigned | FK → stores.id, not null |
+| organization_id | bigint unsigned | FK → organizations.id, not null, RESTRICT |
+| store_id | bigint unsigned | FK → stores.id, not null, RESTRICT |
 | order_id | bigint unsigned | FK → orders.id, not null, RESTRICT |
 | payment_method_id | bigint unsigned | FK → payment_methods.id, nullable, SET NULL — **new**; nullable because a customer may pay without saving the card |
 | stripe_payment_intent_id | varchar(255) | not null |
 | stripe_charge_id | varchar(255) | nullable |
-| status | varchar (enum: `requires_payment`,`processing`,`succeeded`,`failed`,`canceled`) | not null |
+| status | varchar (enum: `requires_payment`,`processing`,`succeeded`,`failed`,`canceled`) | not null — no default; the application always sets it explicitly at insert time (always `requires_payment` for a new attempt) rather than relying on an implicit column default |
 | amount | decimal(10,2) | not null |
-| currency | char(3) | not null |
+| currency | char(3) | not null — no default (unlike `orders.currency`'s `usd` default); each payment attempt's currency is always set explicitly from the order it belongs to |
 | failure_reason | varchar(255) | nullable |
 | created_at / updated_at | timestamp | |
 
 - Unique: `stripe_payment_intent_id`
 - Indexes: `(order_id, status)`, `(store_id, status)`
+- **`organization_id`/`store_id` `ON DELETE RESTRICT`** (2.5 — made explicit; previously undocumented, resolved as part of Phase 2E's design review, I-2): consistent with the established, already-decided convention for every top-level tenant-scoped table in this schema (`stores.organization_id`, `customers.organization_id`/`store_id`, `categories`/`products`/`product_variants`, `orders`).
 
 #### `refunds`
-*Source of truth, append-mostly.* **Unchanged in shape from the prior design** — `organization_id`, `store_id`, `order_id`, `payment_id`, `initiated_by_user_id`, `stripe_refund_id` (unique), `amount`, `reason`, `status`. Full-order refunds only for MVP.
+*Source of truth, append-mostly (new row per refund attempt).* Structurally mirrors `payments` on the reverse side of the transaction — the same "one row per attempt, never mutated back to a non-terminal state" shape.
+
+| Column | Type | Notes |
+|---|---|---|
+| id | bigint unsigned | PK |
+| organization_id | bigint unsigned | FK → organizations.id, not null, RESTRICT |
+| store_id | bigint unsigned | FK → stores.id, not null, RESTRICT |
+| order_id | bigint unsigned | FK → orders.id, not null, RESTRICT |
+| payment_id | bigint unsigned | FK → payments.id, not null, RESTRICT — a refund without a payment it refunds is meaningless, so this is never nullable |
+| initiated_by_user_id | bigint unsigned | FK → users.id, nullable, SET NULL |
+| stripe_refund_id | varchar(255) | not null, unique |
+| amount | decimal(10,2) | not null |
+| reason | varchar(255) | nullable — an admin's free-text note, not a fixed enum; PRD describes no required refund-reason taxonomy |
+| status | varchar (enum: `pending`,`succeeded`,`failed`) | not null, default `pending` — the one column in this table with an explicit default, matching the state model's own starting state for a new refund attempt |
+| created_at / updated_at | timestamp | |
+
+- Unique: `stripe_refund_id`
+- Indexes: `(order_id, status)`, `(store_id, status)` — mirrors `payments`' index shape exactly, for the same query patterns (order detail, store-level refund reporting)
+- No `deleted_at` — same reasoning as `payments`/`orders`: an append-mostly financial/audit record has no human-meaningful unique value needing reuse, and must remain permanently queryable. Not in the mutate-on-delete soft-delete table list.
+
+**Why `payment_id` is 1:N structurally (§12), even though MVP only exercises one refund per payment in practice**: a refund is a distinct attempt/transaction against a specific payment, with its own independent Stripe API call, its own webhook event, and its own success/failure outcome — modeling it as `refunds.payment_id` (many rows can reference one payment) rather than a single `payments.refund_id` back-reference keeps the door open for a future retried or partial refund without any schema change, the same way `payments.order_id` being 1:N already keeps the door open for payment retries.
+
+**Why `initiated_by_user_id` is nullable**: a refund isn't always admin-initiated through this application's UI — it can also originate from a direct action in the Stripe dashboard, discovered here only when the `charge.refunded` webhook arrives. There is no application user to attribute in that case, so the column must be nullable, `SET NULL` on the referenced user's removal — matching the identical pattern and rationale already used for `inventory_transactions.created_by_user_id` (null for system-driven rows).
+
+**Append-mostly lifecycle**: a `refunds` row is inserted once (`status = pending`, set by whichever code path initiates it) and its `status` transitions exactly once to a terminal value (`succeeded` or `failed`, driven exclusively by the `charge.refunded` webhook) — never reopened, never mutated back to `pending`. A second refund attempt against the same payment is always a new row, mirroring `payments`' own retry semantics exactly.
 
 **Already future-proofed for partial refunds without a schema change** (§21): because inventory restoration is now keyed per `order_item` (see `inventory_transactions` below) rather than per whole order, and `refunds.amount` already accepts any value rather than requiring it equal the order total, a future partial refund only needs new *business logic* (refund a subset of an order's items) — the schema doesn't need to change to support it. No `refund_items` table is added now; one would be introduced only when partial refunds actually become a requirement.
 
@@ -500,9 +548,23 @@ Every mutation — sale, restock, adjustment, or refund, whether triggered by ch
 ### Platform
 
 #### `stripe_webhook_events`
-*Append-only idempotency ledger / external-system reference.* **Unchanged — confirmed still sufficient** (§29) after adding saved payment methods and the refund/variant changes above: webhook events resolve to `payments`/`refunds` rows via Stripe's own IDs (`payment_intent_id`, `charge_id`, `refund_id`) during processing; nothing about payment methods or variants changes what this table needs to store.
+*Append-only idempotency ledger / external-system reference.* Confirmed still sufficient (§29) after adding saved payment methods and the refund/variant changes above: webhook events resolve to `payments`/`refunds` rows via Stripe's own IDs (`payment_intent_id`, `charge_id`, `refund_id`) during processing; nothing about payment methods or variants changes what this table needs to store.
 
-Full detail unchanged: `id, stripe_event_id (unique), type, processed_at, payload (json, nullable), created_at`; index `(type, processed_at)`. The insert into this table and the order's `pending → paid` transition remain required to occur in the **same database transaction** — unchanged critical requirement from the prior design.
+| Column | Type | Notes |
+|---|---|---|
+| id | bigint unsigned | PK |
+| stripe_event_id | varchar(255) | not null, unique — **the webhook idempotency key**; the insert attempt against this constraint is the atomic guard against Stripe's at-least-once delivery |
+| type | varchar(255) | not null — the Stripe event type (e.g. `payment_intent.succeeded`), used to route the event to the correct handler |
+| processed_at | timestamp | not null — no default; set explicitly by the handler at insert time, since the row is written as part of processing the event, not before |
+| payload | json | nullable — the raw event payload, kept for debugging/replay; never queried as live relational structure |
+| created_at | timestamp | **no `updated_at` — append-only**, same reasoning as `inventory_transactions` |
+
+- Unique: `stripe_event_id`
+- Index: `(type, processed_at)` — supports operational queries such as "show me all webhook events of type X processed in the last hour"
+- **No `deleted_at`** — an external-system reference/idempotency ledger has no reason to ever be hidden or removed; it must remain permanently queryable as the record of "every Stripe event this system has ever seen." Not in the mutate-on-delete soft-delete table list.
+- **No foreign keys** — deliberately standalone. A single webhook event resolves to exactly one tenant's `payments`/`refunds` row via Stripe's own IDs, but that resolution happens *during* processing, after the tenant context has been looked up from the event — the event itself is a flat external-system record with no tenant context of its own, and no `organization_id`/`store_id` column, consistent with `platform_admins`' treatment as structurally outside the tenant hierarchy.
+
+The insert into this table and the order's `pending → paid` transition remain required to occur in the **same database transaction** — unchanged critical requirement from the prior design.
 
 #### `reports`
 *Immutable historical snapshot (AI-generated artifact).* **Unchanged.** `id, organization_id, store_id (nullable), type, period_start, period_end, content (json), generated_by_user_id (nullable), created_at` — no `updated_at`, a regenerated report is a new row.
@@ -604,6 +666,8 @@ erDiagram
 ### 3. Allowed state transitions
 
 **`orders.status`**: `pending → paid` (exactly once — see §8) · `pending → cancelled` (expiry sweep or explicit cancel, before any payment succeeds) · `paid → processing → shipped → completed` · `{paid, processing, shipped, completed} → refunded` (see §5). No other transitions are valid; in particular there is no `pending → shipped`/`completed` without first passing through `paid`.
+
+**Authoritative business invariant (2.4) — no direct `paid → cancelled` transition.** `cancelled` is reachable *only* from `pending`. Once an order has reached `paid` (or any state beyond it), it can never be transitioned directly to `cancelled` — the only way to stop a paid order is the refund flow (`{paid, processing, shipped, completed} → refunded`, above). This was already implied by the transition list itself but is recorded here explicitly because it constrains future Store Admin order-action UI: a "Cancel Order" action must be unavailable (or must route to "Refund") once an order is `paid` or later. This is not a new rule — it is the existing model, named explicitly so it is never silently reinterpreted.
 
 **`payments.status`**: `requires_payment → processing → {succeeded | failed}` · `requires_payment → canceled`. All three of `succeeded`/`failed`/`canceled` are terminal — a row never transitions out of them. A retry is always a **new row** starting again at `requires_payment` (see §7), never a resurrection of an old one.
 
@@ -730,6 +794,7 @@ Every scenario named in this task, and how the design prevents corruption:
 7. **Inventory adjustment (manual)** — goes through the same single locked service as every other mutation; each manual action is a genuinely new, intentional transaction (correctly *not* deduplicated, unlike webhook-driven events).
 8. **Order cancellation vs. payment webhook** — the order's status transition happens inside a transaction that locks the `orders` row and validates the *current* status before applying a transition; the loser of the race is rejected/no-op'd rather than silently overwriting.
 9. **Two admins modifying inventory simultaneously** — identical protection to #1/#7: the row lock on `inventory` serializes *any* concurrent mutation of a given variant, regardless of whether the two actors are two admins, a checkout and a refund, or an admin and a queue job.
+10. **Late payment success against already-depleted inventory (2.4 — known, deferred to Phase 2F, not resolved here).** Phase 2D creates `pending` orders with **no inventory reservation** — MVP has no soft-hold system (§ "Inventory & Concurrency," unchanged decision). This means multiple `pending` orders can simultaneously reference the same remaining stock of a variant; nothing at order-creation time checks or reserves inventory. If two such orders both later reach a successful payment, the *second* one to reach the locked inventory service (#1/#2 above) may find `new_quantity < 0` and be rejected by that service's own guard — but **what should then happen at the order/webhook level is explicitly not decided**: does the order get auto-refunded, flagged for manual reconciliation, left in a stuck `paid`-but-not-inventory-applied state, or something else? This is a real, acknowledged gap between Phase 2D (which permits the double-claim) and Phase 2F (which will discover the conflict) — recorded here so it is not silently forgotten, and explicitly deferred: **no behavior for this scenario is specified or implemented in Phase 2D**. Must be resolved during Phase 2F's design pass, not before.
 
 ## Idempotency Review
 
@@ -751,10 +816,15 @@ No uniqueness constraint in this design accidentally prevents two *legitimate* o
 
 **Cascading soft-deletes — resolved**: soft-deleting a `store` does **not** cascade to its `products`/`categories`/`customers`. Deactivation is instead **blocked at the application layer** while active resources exist under the store — an admin must explicitly archive/reassign them first. Cascading was rejected because it's an implicit, surprising, large-blast-radius side effect (one action silently soft-deleting an unbounded number of dependent rows); blocking is explicit and safer, consistent with this project's general preference for structural, hard-to-misuse safety over convenience.
 
-Both items that were open in the prior design are now resolved and documented, not left pending.
+**Product soft-delete vs. active variants/options — resolved (2.3)**: this is deliberately the *opposite* policy from the store-level rule directly above, and the distinction is intentional, not an inconsistency. Soft-deleting a `product` is **never blocked** by the existence of active `product_variants`/`product_options` underneath it — an admin can soft-delete a product regardless of what variants exist. The store-level block exists because a store owns *other tenants' visible top-level resources* (products, categories, customers) whose loss is a large, surprising blast radius; a product's own variants/options are pure children with no independent lifecycle or visibility outside their parent, so there's nothing distinct to protect by blocking. On product soft-delete: `product_variants`, `product_options`, `product_option_values`, and `product_variant_option_values` rows are **not** cascaded, deleted, or mutated in any way — they remain exactly as they were in the database (this matters for order history: `order_items.product_variant_id` and the inventory ledger still resolve correctly). What changes is reachability, not existence: normal storefront/catalog queries scope on `products.deleted_at IS NULL` (via Eloquent's default `SoftDeletes` behavior), so a soft-deleted product's variants/options become unreachable through the ordinary product-listing/product-detail query paths, even though the rows themselves persist untouched. No new DB constraint, column, or migration is introduced for this — it is a query-scoping/service-layer behavior, identical in kind to how a soft-deleted `product_variant` already survives for historical `order_items` to reference.
+
+All three items — the prior design's two open items, plus this Phase 2C clarification — are now resolved and documented, not left pending.
 
 ---
 
 ## Open Decisions
 
-**None remain.** The last open item — PRD.md §7.1 "Payment Status" vs. "Order Status" — is now resolved; see "Order & Payment State Models — Authoritative Interaction Model" above for the full resolution. Summary: `orders.status` (fulfillment lifecycle) and `payments.status` (payment-attempt lifecycle) are confirmed as two separate state machines with different cardinality (1 order : N payment attempts), interacting through exactly one controlled transition per direction (a successful payment triggers `pending → paid`; a successful refund triggers `→ refunded`). No `orders.payment_status` column is added. PRD.md's "Payment Status" field is satisfied as a derived/view concept, not a stored column.
+**One item deferred (non-blocking); the prior historical item remains closed.**
+
+- **CLOSED**: PRD.md §7.1 "Payment Status" vs. "Order Status" — resolved; see "Order & Payment State Models — Authoritative Interaction Model" above for the full resolution. Summary: `orders.status` (fulfillment lifecycle) and `payments.status` (payment-attempt lifecycle) are confirmed as two separate state machines with different cardinality (1 order : N payment attempts), interacting through exactly one controlled transition per direction (a successful payment triggers `pending → paid`; a successful refund triggers `→ refunded`). No `orders.payment_status` column is added. PRD.md's "Payment Status" field is satisfied as a derived/view concept, not a stored column.
+- **DEFERRED to Phase 2F (2.4, not blocking Phase 2D)**: the late-payment/inventory-oversell webhook-level consequence — see "Concurrency Review" item 10 above. Phase 2D's lack of inventory reservation at order-creation time means a payment can later succeed against a variant that has since sold out via a different order; the exact resulting behavior (auto-refund, manual-reconciliation flag, or otherwise) is explicitly not decided. Must be resolved when Phase 2F (Inventory) is designed, not before — recorded here so it isn't lost in the meantime.
