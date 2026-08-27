@@ -1,10 +1,18 @@
 # Database Design
 
-**Status: Database Design 2.0 — under review, NOT yet approved.** This is a major second-pass upgrade from the MVP schema previously approved, expanding the catalog into a proper product/variant model and adding customer addresses, saved Stripe payment methods, and a corrected inventory idempotency key. The one remaining open decision (PRD.md §7.1 "Payment Status" vs. "Order Status") has since been resolved — see "Order & Payment State Models — Authoritative Interaction Model" below; no open decisions remain. No migrations exist yet. Do not treat this version as authoritative until explicitly approved — see `docs/development/project-status.md`.
+**Status: Database Design 2.2 — APPROVED.** Version 2.0 was a major upgrade from the original MVP schema, expanding the catalog into a proper product/variant model and adding customer addresses, saved Stripe payment methods, and a corrected inventory idempotency key; its one remaining open decision (PRD.md §7.1 "Payment Status" vs. "Order Status") was resolved — see "Order & Payment State Models — Authoritative Interaction Model" below. Version 2.1 added a `platform_admins` table and an organization approval/suspension lifecycle (`organizations.status` and related audit columns), establishing Platform Admin as a third identity domain structurally separate from the Organization → Store → merchant-user hierarchy and from `customers`. **Version 2.2, approved 2026-08-26, removes `carts`/`cart_items` from the MySQL schema entirely** — for MVP, carts are intentionally ephemeral (guest: browser `localStorage`; authenticated: Redis, tenant/customer-namespaced, TTL'd) and are never persisted in MySQL; MySQL remains the durable source of truth beginning at the pending order, and checkout revalidates all cart contents against MySQL rather than trusting them. See "Cart Architecture" changelog entry near the former Cart section below, and `docs/architecture/system-architecture.md` for the full Redis/localStorage design. This document is authoritative for Phase 2 implementation — see `docs/development/project-status.md`.
+
+## Changelog
+
+- **2.2 (2026-08-26)** — Removed `carts`/`cart_items` MySQL tables. Cart state for MVP is ephemeral: guest carts live in browser `localStorage`; authenticated-customer carts live in Redis (tenant/customer-namespaced key, TTL'd, no MySQL persistence). Checkout treats cart contents as untrusted input — it revalidates `product_variant_id`/quantity and recalculates all prices/totals against MySQL, never trusting client-supplied values. No MySQL migration for `carts`/`cart_items` had been written yet (Phase 2D, not started), so this required no migration rollback — only a design-document and plan correction. Do not reintroduce a MySQL `carts`/`cart_items` table later without explicitly reconsidering and re-approving this architecture.
+- **2.1 (2026-08-26)** — Added `platform_admins` (third, structurally separate identity domain) and an organization approval/suspension lifecycle (`organizations.status` + audit columns).
+- **2.0** — Upgraded the original MVP schema into a product/variant model; added `customer_addresses`, `order_addresses`, `payment_methods`; corrected the inventory idempotency key.
 
 **Conventions**: `id` = `bigint unsigned` auto-increment PK. All monetary columns `decimal(10,2)`. All tables have `created_at`/`updated_at` unless noted otherwise. All status/role/reason columns are `varchar` backed by a PHP 8.1+ native enum with an Eloquent cast — **not** MySQL's native `ENUM` type. Target MySQL ≥8.0.16 (or current 8.0/8.4) so `CHECK` constraints are enforced.
 
 **Tenant-scoping rule** (applied consistently): every table representing a *top-level, independently-queried* tenant-scoped resource carries `organization_id` (and `store_id`, where applicable) directly. Tables that only ever exist attached to an already-scoped parent, and are never queried independently of it, rely on that parent's tenant columns instead — one or two hops through an already-scoped ownership chain is acceptable. Each table below states explicitly which category it falls into and why.
+
+**Platform Admin is explicitly outside this rule** — `platform_admins` is neither a tenant-scoped resource nor a child of one. It carries no `organization_id`/`store_id`, ever, and must never be joined into tenant-isolated queries. It is a platform-operator identity that sits structurally above `organizations`, not inside any single organization's tenant boundary.
 
 ## The Sellable Unit
 
@@ -16,19 +24,51 @@
 
 ### Tenancy & Identity
 
+#### `platform_admins`
+*Source of truth.* **New in 2.1.** Platform-level operator identity — manages the SaaS platform itself (organization approval/rejection/suspension, platform-wide visibility into merchants/stores/customers), not any single organization. Structurally outside the `Organization → Store` hierarchy.
+
+| Column | Type | Notes |
+|---|---|---|
+| id | bigint unsigned | PK |
+| name | varchar(255) | not null |
+| email | varchar(255) | not null — global uniqueness; no org/store scoping applies to a platform-level identity |
+| password | varchar(255) | not null, hashed |
+| email_verified_at | timestamp | nullable |
+| created_at / updated_at | timestamp | |
+| deleted_at | timestamp | nullable — soft delete, same mutate-on-delete pattern as `users`/`customers` |
+
+- Unique: `email`
+- No `role` column for MVP — the PRD and this addition describe a single flat Platform Admin capability set (review/approve/reject/suspend organizations, platform-level visibility), not multiple platform-admin tiers. A tiered platform-role system would be speculative scope beyond anything currently required — extend later only if a real requirement surfaces.
+- **Never** referenced by `organization_user`, `store_user`, or any tenant-scoped ownership relationship — only ever referenced as the *actor* on `organizations`' audit columns (see below).
+
 #### `organizations`
-*Source of truth.* Root of the tenant hierarchy. **Unchanged from the prior design.**
+*Source of truth.* Root of the tenant hierarchy. **Gains an approval/suspension lifecycle in 2.1** (see below) — identity/slug shape otherwise unchanged from the prior design.
 
 | Column | Type | Notes |
 |---|---|---|
 | id | bigint unsigned | PK |
 | name | varchar(255) | not null |
 | slug | varchar(255) | not null |
+| status | varchar (enum: `pending`,`active`,`rejected`,`suspended`) | not null, default `pending` — a new organization must be approved by a Platform Admin before it becomes `active` |
+| status_reason | varchar(255) | nullable — free-text note explaining a `rejected` or `suspended` decision |
+| approved_at | timestamp | nullable |
+| approved_by_platform_admin_id | bigint unsigned | FK → platform_admins.id, nullable, SET NULL |
+| rejected_at | timestamp | nullable |
+| rejected_by_platform_admin_id | bigint unsigned | FK → platform_admins.id, nullable, SET NULL |
+| suspended_at | timestamp | nullable |
+| suspended_by_platform_admin_id | bigint unsigned | FK → platform_admins.id, nullable, SET NULL |
 | created_at / updated_at | timestamp | |
 | deleted_at | timestamp | nullable — soft delete |
 
 - Unique: `slug` — see **Soft-Delete Strategy** below for how this survives soft-deletion without permanently blocking reuse.
+- Index: `status` — supports a Platform Admin's "organizations pending review" / "suspended organizations" list queries.
 - Delete/update: soft-delete only.
+
+**Explicit per-action audit pairs, not a single `reviewed_by`/`reviewed_at`**: a single reviewer/timestamp pair would only preserve the *most recent* lifecycle action, silently losing history the moment an organization is approved and later suspended (or reactivated and suspended again). `approved_at`/`approved_by_platform_admin_id` and `suspended_at`/`suspended_by_platform_admin_id` are separate, independent column pairs so both facts survive regardless of how many times an organization's status changes.
+
+**Why `rejected_at`/`rejected_by_platform_admin_id` are included, not just `status_reason`**: approval and rejection are the two symmetric outcomes of the identical Platform Admin review action on a `pending` organization — recording *who* approved an organization but not *who* rejected one would be an arbitrary accountability gap between two outcomes of one decision, not a deliberate simplification, so rejection gets the same actor+timestamp treatment as approval. This also means a future re-application flow (`rejected → pending` again) has a ready-made record of which rejection a later approval superseded, without a schema change — not built now, but the columns already support it.
+
+**No separate `audit_logs` table** — these are the only lifecycle-audit facts the stated Platform Admin responsibilities require; a general-purpose audit log would be speculative scope beyond what's asked for.
 
 #### `stores`
 *Source of truth.* **Unchanged.**
@@ -184,7 +224,7 @@ This is the core of this revision. Structure: `Product → Options → Option Va
 - Indexes: `(store_id, status)`
 - FK: `product_id` → CASCADE
 
-**Why `product_variants` gets `organization_id`/`store_id` directly, unlike other child tables**: unlike `order_items` or `cart_items`, variants are frequently queried on their own — SKU lookups, low-stock reports, "list every variant for store X" — not only ever reached through a parent. This is the same reasoning that already promoted `products`, `orders`, `payments`, and `refunds` to carrying direct tenant columns; `product_variants` belongs in that group, not in the "pure child" group.
+**Why `product_variants` gets `organization_id`/`store_id` directly, unlike other child tables**: unlike `order_items`, variants are frequently queried on their own — SKU lookups, low-stock reports, "list every variant for store X" — not only ever reached through a parent. This is the same reasoning that already promoted `products`, `orders`, `payments`, and `refunds` to carrying direct tenant columns; `product_variants` belongs in that group, not in the "pure child" group.
 
 **Rejected fields** (considered per the task's "if appropriate" framing, not included): `weight`, `dimensions`, `barcode`. PRD explicitly places "Shipping Provider Integration" out of MVP scope (§29) and describes no barcode/POS scanning workflow anywhere — nothing in the product requirements would ever read these columns. Included only `compare_at_price`, which the task named as a wanted field outright (not conditionally), not one left to judgment.
 
@@ -277,26 +317,17 @@ This is the core of this revision. Structure: `Product → Options → Option Va
 
 ---
 
-### Cart
+### Cart — intentionally NOT a MySQL table (Database Design 2.2)
 
-#### `carts`
-*Source of truth.* **Unchanged in shape** from the prior design — one persistent row per (customer, store).
+**There is no `carts` or `cart_items` table in this schema.** This is a deliberate MVP architecture decision, not an oversight: cart state is ephemeral and lives outside MySQL entirely.
 
-Full detail unchanged: `id, organization_id, store_id, customer_id, created_at, updated_at`; `unique(customer_id, store_id)`.
+- **Guest customers**: cart lives in the browser (`localStorage`) — never sent to or stored by the backend until checkout.
+- **Authenticated customers**: cart lives in Redis, keyed by a server-derived tenant/customer namespace (never client-supplied), with a TTL. Redis remains non-durable, cache-tier storage — it is never treated as a source of truth.
+- **Checkout is the boundary**: whatever the cart contains (from either source), Laravel treats it as **untrusted input** — only `product_variant_id` and `quantity` are read from it. Price, availability, inventory, and totals are always revalidated/recalculated from MySQL at checkout time; nothing about pricing or totals is ever accepted from the client. The durable business record begins with the **pending order** (`orders`/`order_items`, Phase 2D), not with any cart representation.
+- **No FK-based cleanup**: because there is no `cart_items` row, a deleted/archived `product_variant` is not automatically pruned from any cart the way the old `CASCADE` FK would have done. Checkout (and any cart-read path) must defensively detect and handle a cart line referencing a variant that no longer exists or is no longer active.
+- **No guest checkout**: this remains unchanged — a guest may build a cart, but checkout still requires an authenticated `customers` row (the durable `orders.customer_id` FK requires one, and the authenticated cart itself is keyed by customer).
 
-#### `cart_items`
-*Source of truth, mutable — reflects live variant price/availability until checkout.* **Now points at the variant, not the product.**
-
-| Column | Type | Notes |
-|---|---|---|
-| id | bigint unsigned | PK |
-| cart_id | bigint unsigned | FK → carts.id, not null, CASCADE |
-| product_variant_id | bigint unsigned | FK → product_variants.id, not null, CASCADE |
-| quantity | int | not null, `CHECK (quantity > 0)` |
-| created_at / updated_at | timestamp | |
-
-- Unique: `(cart_id, product_variant_id)`
-- **Only `product_variant_id`, no separate `product_id`** (§13): the variant already references its product; storing `product_id` again would be redundant, driftable relational data. "T-Shirt / Red / Medium" and "T-Shirt / Blue / Medium" are trivially two different cart lines because they're two different `product_variant_id`s — no ambiguity, no possibility of confusing them.
+Full architectural detail — server-derived key namespacing, TTL, the intended Redis Hash + atomic `HINCRBY` concurrency primitive, merge-on-login (left as a future implementation decision), and Redis eviction/isolation policy (left as a future operational decision) — lives in `docs/architecture/system-architecture.md` §"Cart Architecture." This document only records that no MySQL schema exists for cart state and why.
 
 ---
 
@@ -482,13 +513,14 @@ Full detail unchanged: `id, stripe_event_id (unique), type, processed_at, payloa
 
 | Role | Tables |
 |---|---|
-| Source of truth (mutable, live) | `organizations`, `stores`, `users`, `organization_user`, `store_user`, `customers`, `products`, `categories`, `product_options`, `product_option_values`, `product_variants`, `product_variant_option_values`, `product_images`, `customer_addresses`, `payment_methods`, `carts`, `cart_items`, `orders` (lifecycle status) |
+| Source of truth (mutable, live) | `platform_admins`, `organizations` (lifecycle status), `stores`, `users`, `organization_user`, `store_user`, `customers`, `products`, `categories`, `product_options`, `product_option_values`, `product_variants`, `product_variant_option_values`, `product_images`, `customer_addresses`, `payment_methods`, `orders` (lifecycle status) |
 | Current-state materialization | `inventory` |
 | Immutable historical snapshot | `order_items`, `order_addresses`, `reports` |
 | Append-only ledger | `inventory_transactions` |
 | Source of truth, append-mostly | `payments`, `refunds` |
 | External-system reference / idempotency ledger | `stripe_webhook_events` |
 | Cache-related | *none in MySQL — all caching lives in Redis, outside this schema* |
+| Ephemeral, not in MySQL at all | Cart state (`carts`/`cart_items` removed in 2.2) — guest: `localStorage`; authenticated: Redis. See "Cart — intentionally NOT a MySQL table" above. |
 
 ---
 
@@ -496,6 +528,7 @@ Full detail unchanged: `id, stripe_event_id (unique), type, processed_at, payloa
 
 ```mermaid
 erDiagram
+    PLATFORM_ADMINS ||--o{ ORGANIZATIONS : "approves/rejects/suspends (audit)"
     ORGANIZATIONS ||--o{ STORES : owns
     ORGANIZATIONS ||--o{ ORGANIZATION_USER : has
     USERS ||--o{ ORGANIZATION_USER : has
@@ -504,10 +537,6 @@ erDiagram
     STORES ||--o{ CUSTOMERS : has
     CUSTOMERS ||--o{ CUSTOMER_ADDRESSES : saves
     CUSTOMERS ||--o{ PAYMENT_METHODS : saves
-    CUSTOMERS ||--o{ CARTS : has
-    STORES ||--o{ CARTS : scopes
-    CARTS ||--o{ CART_ITEMS : contains
-    PRODUCT_VARIANTS ||--o{ CART_ITEMS : "referenced by"
     STORES ||--o{ PRODUCTS : sells
     CATEGORIES ||--o{ PRODUCTS : groups
     STORES ||--o{ CATEGORIES : has
@@ -534,14 +563,13 @@ erDiagram
     ORGANIZATIONS ||--o{ REPORTS : has
     STORES ||--o{ REPORTS : "scoped to (nullable)"
 
+    PLATFORM_ADMINS { bigint id PK }
     ORGANIZATIONS { bigint id PK }
     STORES { bigint id PK }
     USERS { bigint id PK }
     CUSTOMERS { bigint id PK }
     CUSTOMER_ADDRESSES { bigint id PK }
     PAYMENT_METHODS { bigint id PK }
-    CARTS { bigint id PK }
-    CART_ITEMS { bigint id PK }
     PRODUCTS { bigint id PK }
     CATEGORIES { bigint id PK }
     PRODUCT_OPTIONS { bigint id PK }
@@ -675,7 +703,9 @@ Reviewed against the four anti-patterns named in this task (§32) — none prese
 ## Important Constraints (recap, updated)
 
 - `CHECK (inventory.quantity_on_hand >= 0)`
-- `CHECK (cart_items.quantity > 0)`, `CHECK (order_items.quantity > 0)`
+- `CHECK (order_items.quantity > 0)`
+- `unique(platform_admins.email)`
+- `unique(organizations.slug)`, index `organizations.status`
 - `unique(organization_user.user_id)` — one org per user (MVP)
 - `unique(products.store_id, slug)`, `unique(customers.store_id, email)`, `unique(categories.store_id, slug)`
 - `unique(product_options.product_id, name)`, `unique(product_option_values.product_option_id, value)`
@@ -685,7 +715,6 @@ Reviewed against the four anti-patterns named in this task (§32) — none prese
 - `unique(payments.stripe_payment_intent_id)`, `unique(refunds.stripe_refund_id)`, `unique(stripe_webhook_events.stripe_event_id)`
 - `unique(inventory.product_variant_id)`
 - **`unique(inventory_transactions.order_item_id, reason)`** — corrected idempotency key (was `order_id`)
-- `unique(carts.customer_id, store_id)`, `unique(cart_items.cart_id, product_variant_id)`
 - `unique(orders.order_number)`, `unique(order_addresses.order_id, type)`
 
 ## Concurrency Review
@@ -694,7 +723,7 @@ Every scenario named in this task, and how the design prevents corruption:
 
 1. **Concurrent checkout on the same variant** — the locked inventory service (`SELECT ... FOR UPDATE` on `inventory` keyed by `product_variant_id`) serializes the deduction; the losing transaction re-reads fresh state after the lock releases.
 2. **Concurrent inventory deduction** (same as #1) — identical mechanism regardless of trigger.
-3. **Concurrent cart updates** — `unique(cart_id, product_variant_id)` + an upsert pattern (`INSERT ... ON DUPLICATE KEY UPDATE quantity = quantity + ?`) keeps this correct without a lock; carts are low-stakes compared to inventory/payment.
+3. **Concurrent cart updates** — no longer a MySQL concern (2.2): there is no `carts`/`cart_items` table to race on. For an authenticated customer's Redis-backed cart, the intended primitive is a **Redis Hash keyed by the cart's tenant/customer namespace, with `product_variant_id` as the hash field and quantity as the value**, mutated via atomic `HINCRBY` — Redis's single-threaded command execution serializes concurrent increments correctly without an application-level lock, the same no-lost-update guarantee the old `unique(cart_id, product_variant_id)` + upsert pattern provided, without the read-modify-write race a naive JSON-blob cart would introduce. Not implemented yet — documented here as the intended direction. Regardless of the outcome of any concurrent cart mutation, carts remain low-stakes compared to inventory/payment: checkout re-validates and re-locks inventory independently (#1/#2 above), so a cart race can at worst produce a wrong *cart* quantity, never an oversold or corrupted order.
 4. **Duplicate Stripe webhooks** — `stripe_webhook_events.stripe_event_id` unique constraint; the insert attempt is the atomic guard.
 5. **Payment retry** — a new `payments` row per attempt; nothing is mutated in place, so there's no race to corrupt.
 6. **Refund retry** — `refunds.stripe_refund_id` unique constraint prevents duplicate `Refund` rows; per-`order_item` inventory restoration via `(order_item_id, 'refund')` makes the actual stock restoration idempotent and resumable (see `inventory_transactions` above).
@@ -716,7 +745,7 @@ No uniqueness constraint in this design accidentally prevents two *legitimate* o
 
 ## Soft-Delete Strategy — resolved
 
-**Decision: mutate the unique column at soft-delete time**, freeing the value for reuse, rather than permanently reserving it. Applied to every soft-deletable table with a human-meaningful unique value: `organizations.slug`, `stores.slug`, `users.email`, `customers.email`, `products.slug`, `product_variants.sku`, `categories.slug`. Mechanism: a model `deleting` event/observer suffixes the value (e.g. `email` → `email+deleted-{id}@...`, `slug` → `slug-deleted-{id}`) at the moment of soft-delete, implemented at the application layer (MySQL's NULL-distinct unique-index behavior cannot express "unique among active rows only" directly — see the prior design's analysis of why naively adding `deleted_at` to the index doesn't work).
+**Decision: mutate the unique column at soft-delete time**, freeing the value for reuse, rather than permanently reserving it. Applied to every soft-deletable table with a human-meaningful unique value: `platform_admins.email`, `organizations.slug`, `stores.slug`, `users.email`, `customers.email`, `products.slug`, `product_variants.sku`, `categories.slug`. Mechanism: a model `deleting` event/observer suffixes the value (e.g. `email` → `email+deleted-{id}@...`, `slug` → `slug-deleted-{id}`) at the moment of soft-delete, implemented at the application layer (MySQL's NULL-distinct unique-index behavior cannot express "unique among active rows only" directly — see the prior design's analysis of why naively adding `deleted_at` to the index doesn't work).
 
 **Rationale**: the alternative — permanently blocking reuse of a deleted row's value — is defensible for `stores`/`products`/`categories` slugs but actively poor for `users.email`/`customers.email`: a real customer or staff member reasonably expects to be able to re-register with the same email after deleting an account. Mutate-on-delete is the standard, well-understood Laravel pattern for exactly this problem.
 

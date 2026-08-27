@@ -28,18 +28,27 @@ Prioritize a clean, understandable MVP over unnecessary complexity in every sect
 ### Authentication
 
 - Laravel Sanctum for authentication (not JWT, unless a specific future requirement emerges).
+- **Three separate identity tables, three separate guards**: `platform_admins`, `users` (merchant admin/staff), `customers`. No shared table, no shared guard — a token issued to one is never valid against another's routes. All three share Sanctum's existing polymorphic `personal_access_tokens` table; no per-identity token schema.
 - React maintains authenticated user state on the frontend.
 - All protected API requests require authentication.
 - Authorization (what an authenticated user is allowed to do) is enforced through Laravel Policies / Gates, not ad-hoc checks scattered in controllers.
+
+### Platform Admin
+
+- **Platform Admin is a structurally separate identity domain, not a fourth RBAC rung.** It does not belong to, and is not nested inside, the Organization Owner ⊃ Store Admin ⊃ Staff ladder below — it manages the SaaS platform itself (reviewing/approving/rejecting/suspending organizations, platform-wide read visibility into merchants/stores/customers, platform operational status), not any single organization's data.
+- Platform Admins live in `platform_admins` — never in `users`, `organization_user`, or `store_user`. Do not add a `platform_admin` role to `users`/`organization_user`.
+- Every organization has an approval lifecycle: `organizations.status` (`pending → active`, or `rejected`/`suspended`), defaulting to `pending` — a new organization requires Platform Admin approval before it becomes `active`. This is independent of the RBAC section below.
+- Full schema and rationale: `docs/database/database-design.md`.
 
 ### Multi-Tenancy
 
 Hierarchy:
 
 ```
-Organization
-  → Stores
-      → Store-level resources (Products, Orders, Inventory, ...)
+Platform (platform_admins — outside the tenant hierarchy)
+  → Organization
+      → Stores
+          → Store-level resources (Products, Orders, Inventory, ...)
 ```
 
 Organization-level resources (e.g. the organization itself, its users/roles) do not necessarily have a `store_id` — don't force one onto everything for consistency.
@@ -56,7 +65,17 @@ Requirements:
 
 ### RBAC
 
-Three roles, strictly nested in capability: **Organization Owner** (manages org, stores, users, roles, org-wide analytics/AI) ⊃ **Store Admin** (manages products/orders/customers for their store, analytics, AI) ⊃ **Staff** (view orders, limited store data only). Authorization must be enforced identically for regular API requests and AI tool invocations — there is no separate, looser path for AI-originated data access.
+Three roles, strictly nested in capability, **merchant-side only**: **Organization Owner** (manages org, stores, users, roles, org-wide analytics/AI) ⊃ **Store Admin** (manages products/orders/customers for their store, analytics, AI) ⊃ **Staff** (view orders, limited store data only). Authorization must be enforced identically for regular API requests and AI tool invocations — there is no separate, looser path for AI-originated data access. Platform Admin is not part of this nesting — see "Platform Admin" above.
+
+### Cart Architecture
+
+- **No `carts`/`cart_items` MySQL tables for MVP** (Database Design 2.2) — cart state is intentionally ephemeral: guest carts live in browser `localStorage`; authenticated-customer carts live in Redis, keyed server-side by the resolved tenant/customer context (never client-supplied), TTL'd. Redis is not durable and is not a source of truth here, same as its other roles.
+- **Cart data is not durable.** The durable business record begins at the **pending order** — not at any cart representation. Losing a cart (Redis eviction/TTL expiry, a cleared browser) is an accepted, low-stakes failure mode; losing an order is not.
+- **Cart contents are untrusted input.** Checkout reads only `product_variant_id` and quantity from the cart; price, name, availability, and totals are always revalidated/recalculated from MySQL — never accepted from the client, whether the cart came from `localStorage` or Redis.
+- **No guest checkout, but guest cart-building is fine**: a guest may browse and build a cart; checkout itself still requires an authenticated `customers` account. "No guest checkout" refers only to the actual checkout/payment step, not to browsing or cart-building.
+- Frontend: the guest `localStorage` cart is a narrow, explicit exception to the React-Query-first state strategy below — it's per-browser client state, not server state and not a general-purpose global store.
+- Do not reintroduce a MySQL `carts`/`cart_items` table without explicitly reconsidering and re-approving this architecture.
+- Full rationale: `docs/database/database-design.md` and `docs/architecture/system-architecture.md` §"Cart Architecture."
 
 ### Payment → Order → Inventory Flow
 
@@ -113,17 +132,18 @@ Beyond single-question answering, the AI layer has three escalating capabilities
 
 ### Redis Usage
 
-Three distinct roles, not just caching: analytics query caching (cache-aside pattern: check Redis → miss → MySQL → populate cache), Laravel queue backend, and rate limiting.
+Four distinct roles, not just caching: analytics query caching (cache-aside pattern: check Redis → miss → MySQL → populate cache), Laravel queue backend, rate limiting, and authenticated-customer cart storage (ephemeral, TTL'd — see "Cart Architecture" above). Not a source of truth for anything, including the cart role.
 
 ### Frontend State Management
 
-- React Query owns server state (data fetched from the API) — this covers the large majority of state needs in this app.
+- React Query owns server state (data fetched from the API) — this covers the large majority of state needs in this app, including the **authenticated** customer's cart (`/api/cart`, Redis-backed).
+- **Guest cart (`localStorage`) is a narrow, explicit exception**, not a precedent for a general client store — it's per-browser data with no server counterpart until merge-on-login.
 - Do not introduce Redux or Zustand by default. Add a client-side global state solution only when there's a clear, specific need React Query + local component state can't cover.
 - If/when global client state becomes necessary, a `store/` directory should be added at that point — not scaffolded preemptively.
 
 ## API Surface (Planned)
 
-`/api/auth`, `/api/products`, `/api/categories`, `/api/cart`, `/api/checkout`, `/api/orders`, `/api/customers`, `/api/inventory`, `/api/analytics`, `/api/ai`, `/api/reports` — all requiring auth, authorization, and tenant-scoping as described above.
+`/api/auth`, `/api/products`, `/api/categories`, `/api/cart`, `/api/checkout`, `/api/orders`, `/api/customers`, `/api/inventory`, `/api/analytics`, `/api/ai`, `/api/reports` — all requiring auth, authorization, and tenant-scoping as described above. A separate `/api/platform/*` namespace is implied for Platform Admin (organization review/approve/reject/suspend, platform-wide views) — not yet implemented, and not tenant-scoped like the routes above.
 
 ## Commands (once scaffolded)
 

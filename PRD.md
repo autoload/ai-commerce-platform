@@ -88,6 +88,22 @@ Organization Owners can:
 - Access organization-wide analytics
 - Access AI features
 
+### 3.4 Platform Admin
+
+Platform Admins operate the SaaS platform itself, not any single merchant organization. They are a structurally separate identity from Organization Owner / Store Admin / Staff — not a fourth, higher role in that hierarchy.
+
+Platform Admins can:
+
+- View all merchant organizations
+- Review new merchant registrations
+- Approve organizations
+- Reject organizations
+- Suspend organizations
+- View platform-level merchant/store/customer information
+- Manage platform-level operational status
+
+A new organization registers in a `pending` state and requires Platform Admin approval before it becomes active.
+
 ---
 
 # 4. Multi-Tenancy

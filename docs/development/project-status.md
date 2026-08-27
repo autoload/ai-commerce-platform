@@ -4,11 +4,11 @@ This document is the persistent source of truth for the current development stat
 
 ## Current Phase
 
-**Phase 1 — Docker Infrastructure Bootstrap. Complete and verified.** Phase 0 (Architecture & Database Design) is approved; this phase established a working, verified Docker Compose development environment — Laravel 13 (PHP 8.5) under `backend/`, React 19.2 + TypeScript + Vite under `frontend/`, MySQL 8.4, Redis 7, Nginx, a queue worker, and the Sanctum authentication foundation. **No business logic, migrations for the approved schema, authentication flows, or API endpoints exist yet** — see "Not Started" below. Full detail: "Infrastructure (Phase 1)" section below.
+**Phase 2B — Customer Domain migrations. Complete and verified.** Phase 2A (Platform & Tenant Identity), Phase 1 (Docker Infrastructure Bootstrap), and Phase 0 (Architecture & Database Design, including the Database Design 2.1 Platform Admin correction) are all complete and approved. Phase 2B implemented, migrated, and verified the customer domain: `customers` and `customer_addresses`. **No models, policies, controllers, authentication flows, or API endpoints exist yet** — migrations only, per the incremental-by-functional-area plan. Full detail: "Phase 2B (Database Migrations)" section below (see "Phase 2A (Database Migrations)" for the prior batch).
 
 **Development Environment**: see `docs/development/development-environment.md` for the full, permanent record of the verified local environment — exact versions, Docker architecture, service configuration, credential flow, and commands. That document is now the source of truth for environment detail; the "Infrastructure (Phase 1)" section below is a summary, not a duplicate.
 
-**Database Design 2.0 is APPROVED** as the authoritative database design. `docs/database/database-design.md` was substantially upgraded from the original MVP schema into a production-quality e-commerce data model — product variants/options, customer saved addresses, immutable order address snapshots, and Stripe saved payment methods are now part of the architecture — and its one remaining open decision (order/payment status separation) has been resolved and explicitly approved. Migrations for this schema have **not** been written yet.
+**Database Design 2.2 is APPROVED** as the authoritative database design. Version 2.0 substantially upgraded the original MVP schema into a production-quality e-commerce data model — product variants/options, customer saved addresses, immutable order address snapshots, and Stripe saved payment methods — and resolved its one remaining open decision (order/payment status separation). Version 2.1, approved 2026-08-26, added **Platform Admin as a third, structurally separate identity domain** (`platform_admins` table, outside the Organization → Store → merchant-user hierarchy) plus an organization approval/suspension lifecycle (`organizations.status`: `pending → active`, with `rejected`/`suspended` branches and per-action audit columns). **Version 2.2, also approved 2026-08-26, removes `carts`/`cart_items` from the MySQL schema entirely** — carts are intentionally ephemeral for MVP (guest: browser `localStorage`; authenticated: Redis, tenant/customer-namespaced, TTL'd) and never persisted in MySQL; MySQL remains the durable source of truth beginning at the pending order. Both corrections were made deliberately *before* the relevant Phase 2 migrations were written — Platform Admin before Phase 2A began, and the Cart correction before Phase 2D (not yet started) — see "Platform Admin (Database Design 2.1)" and "Cart Architecture (Database Design 2.2)" under Database Decisions below. Phase 2A's six tables and Phase 2B's two tables (eight total) are now migrated and verified; the remaining tables in the schema have **not** been migrated yet.
 
 ## Completed
 
@@ -23,21 +23,62 @@ This document is the persistent source of truth for the current development stat
 - Persistent project-state tracking established (`docs/development/project-status.md`, plus the "Project State Management" section added to `CLAUDE.md`).
 - **Database Design 2.0 — APPROVED**: the schema was upgraded from a minimal MVP catalog into a proper product/variant model. Major additions: `product_options`/`product_option_values`/`product_variants`/`product_variant_option_values` (Product Variant established as the single sellable unit — `cart_items`, `order_items`, `inventory`, and `inventory_transactions` all now reference `product_variant_id`, never `product_id`, directly); `customer_addresses` (reinstated saved-address book); `order_addresses` (immutable per-order shipping snapshot, replacing the old inline `shipping_*` columns on `orders`); `payment_methods` (Stripe saved payment methods) and `customers.stripe_customer_id`; a corrected inventory idempotency key (`inventory_transactions` now keyed by `order_item_id`, not `order_id` — the old key was a real bug once orders could contain multiple line items); an explicit soft-delete strategy (mutate-on-delete) and cascading-soft-delete policy (blocked at the application layer, not cascaded). Full detail in `docs/database/database-design.md`.
 - **Order/payment status separation resolved and approved** — see "Final Resolution" under Database Decisions below.
+- **Platform Admin architecture correction (Database Design 2.1)** — identified before any Phase 2 migration was written: `platform_admins` added as a third identity domain, structurally separate from `users`/`organization_user`/`store_user` and from `customers`; `organizations` gained an approval/suspension lifecycle (`status`, `status_reason`, `approved_at`/`approved_by_platform_admin_id`, `rejected_at`/`rejected_by_platform_admin_id`, `suspended_at`/`suspended_by_platform_admin_id`). `CLAUDE.md`, `docs/architecture/system-architecture.md`, `docs/database/database-design.md`, and `PRD.md` (new §3.4) all updated. See "Platform Admin (Database Design 2.1)" under Database Decisions below for full detail.
+- **Cart Architecture correction (Database Design 2.2)** — identified and approved before Phase 2D (Cart & Orders, not yet started) was reached: `carts`/`cart_items` removed from the MySQL schema entirely. Cart state for MVP is ephemeral — guest carts in browser `localStorage`, authenticated-customer carts in Redis (server-derived tenant/customer key, TTL'd) — with checkout treating cart contents as untrusted input and revalidating/recalculating everything against MySQL. `CLAUDE.md`, `docs/architecture/system-architecture.md` (new §7 "Cart Architecture"), and `docs/database/database-design.md` all updated; no Phase 2A/2B migration was affected. See "Cart Architecture (Database Design 2.2)" under Database Decisions below for full detail.
 - **Phase 1 — Docker Infrastructure Bootstrap (implementation, not documentation)**: Laravel 13 scaffolded under `backend/`, React 19.2 + TS + Vite scaffolded under `frontend/`, full Docker Compose stack (app, nginx, mysql, redis, queue, node) built and verified running, Sanctum + API routing foundation installed. See "Infrastructure (Phase 1)" below for exact versions, verification results, and commands.
+- **Phase 2A — Platform & Tenant Identity migrations (implementation, verified)**: six migrations created and run against MySQL — `platform_admins`, `organizations`, `stores`, `add_soft_deletes_to_users_table`, `organization_user`, `store_user`. Verified via `php artisan migrate --pretend` (SQL reviewed before running), `php artisan migrate` (batch 2, all six `Ran`), `php artisan db:table` on all six tables (columns, defaults, FK actions, indexes, unique constraints all confirmed matching Database Design 2.1), `php artisan migrate:status`, and `php artisan test` (2/2 passing — Laravel's default example tests; no schema-specific tests exist yet). See "Phase 2A (Database Migrations)" below for full detail.
+- **Phase 2B — Customer Domain migrations (implementation, verified)**: two migrations created and run against MySQL — `create_customers_table`, `create_customer_addresses_table`. Verified via `php -l` on both files, `php artisan migrate --pretend` (SQL reviewed before running), `php artisan migrate` (batch 3, both `Ran`), `php artisan db:table` on both tables (columns, defaults, FK actions — including the `RESTRICT`/`RESTRICT`/`CASCADE` behavior decided for the previously-unresolved `customers` tenant FKs — indexes, unique constraints all confirmed matching the approved Phase 2B plan), `php artisan migrate:status`, and `php artisan test` (2/2 passing). See "Phase 2B (Database Migrations)" below for full detail.
 
-**Implementation work completed:** infrastructure only (Phase 1, above) — verified working via actual command execution, not assumed. No business logic, no migrations for the approved schema, no models beyond Laravel's own defaults, no controllers, no business API routes, no authentication flows, no tests beyond Laravel's default example tests.
+**Implementation work completed:** infrastructure (Phase 1) and Phase 2A/2B migrations (above) — all verified working via actual command execution, not assumed. No models, policies, controllers, business API routes, or authentication flows exist yet; no tests beyond Laravel's default example tests.
 
 ## Current Task
 
-None in progress. Phase 1 (Docker infrastructure) is complete and verified. The project is paused awaiting explicit instruction to begin Phase 2 (database migrations from the approved schema).
+None in progress. Phase 2B is complete and verified; the Cart Architecture correction (Database Design 2.2) has since been completed as a documentation-only change. Phase 2C has **not** started. The project is paused awaiting explicit instruction to begin Phase 2C.
 
 ## Next Step
 
-Write Laravel migrations directly from `docs/database/database-design.md`, once explicitly instructed. No implementation should begin before that instruction, consistent with how every phase so far has required explicit sign-off before proceeding.
+Phase 2C — Catalog: `products`, `categories`, `product_options`, `product_option_values`, `product_variants`, `product_variant_option_values`, `product_images`, once explicitly approved. **Not started** — the Cart Architecture correction (Database Design 2.2, above) was completed first, before Phase 2C began, the same way the Platform Admin correction preceded Phase 2A. Do not begin Phase 2C without explicit approval, consistent with the incremental-by-functional-area approach used for Phases 2A/2B (Design → Review → Migration → Run migration → Verify → Sign-off → Next phase).
+
+Planned subsequent phases after 2C (functional-area batches, each requiring sign-off before the next):
+- **2D — Orders**: `orders`, `order_items`, `order_addresses` (renamed from "Cart & Orders" — `carts`/`cart_items` are no longer part of the MySQL schema at all; see Database Design 2.2)
+- **2E — Payments**: `payments`, `payment_methods`, `refunds`, `stripe_webhook_events`
+- **2F — Inventory**: `inventory`, `inventory_transactions`
+- Later phases cover analytics/AI reports (`reports` table) and are not yet broken down in detail.
+
+## Phase 2A (Database Migrations)
+
+**Status: complete and verified**, 2026-08-26. Six migration files under `backend/database/migrations/`, run against the `mysql` container's `ai_commerce` database in batch 2:
+
+| Migration | Table / change | Key facts verified in the running database |
+|---|---|---|
+| `2026_08_26_220100_create_platform_admins_table` | `platform_admins` (new) | `email` unique; no `organization_id`/`store_id`; no `role`; `deleted_at` present (soft delete). |
+| `2026_08_26_220200_create_organizations_table` | `organizations` (new) | `status` varchar default `pending`; `status_reason` nullable; `approved_at`/`rejected_at`/`suspended_at` nullable; `approved_by_platform_admin_id`/`rejected_by_platform_admin_id`/`suspended_by_platform_admin_id` each FK → `platform_admins.id` `ON DELETE SET NULL`; index on `status`; unique `slug`; `deleted_at` present. |
+| `2026_08_26_220300_create_stores_table` | `stores` (new) | `organization_id` FK → `organizations.id` `ON DELETE RESTRICT`; `status` default `active`; unique `(organization_id, slug)`; index `organization_id`; `deleted_at` present. |
+| `2026_08_26_220400_add_soft_deletes_to_users_table` | `users` (altered) | `deleted_at` added to the existing default-Laravel `users` table; no other column changed. |
+| `2026_08_26_220500_create_organization_user_table` | `organization_user` (new) | `organization_id`/`user_id` FKs `ON DELETE CASCADE`; `role` varchar not null; unique `user_id` (one org per user, MVP); index `organization_id`. |
+| `2026_08_26_220600_create_store_user_table` | `store_user` (new) | `user_id`/`store_id` FKs `ON DELETE CASCADE`; no role column; unique `(user_id, store_id)`; index `store_id`. |
+
+Verification method: `migrate --pretend` reviewed before running; `migrate` executed; `php artisan db:table <table>` run against all six tables and cross-checked column-by-column against `docs/database/database-design.md`; `migrate:status` confirms all six in batch 2 as `Ran`; `php artisan test` passes (2/2 — Laravel defaults only, no schema-specific tests written yet, consistent with migrations-only scope). No conflicts found between the implementation and Database Design 2.1. `organization_user`/`store_user` column/FK/index choices were inferred (the design doc says "unchanged — see prior design," not reproduced there) — flagged, not objected to.
+
+Not yet done (by design, next phases): Eloquent models, the mutate-on-delete soft-delete observers, RBAC policies, TenantContext middleware, any seeders, and Phase 2B onward's tables.
+
+## Phase 2B (Database Migrations)
+
+**Status: complete and verified**, 2026-08-26. Two migration files under `backend/database/migrations/`, run against the `mysql` container's `ai_commerce` database in batch 3:
+
+| Migration | Table / change | Key facts verified in the running database |
+|---|---|---|
+| `2026_08_26_220700_create_customers_table` | `customers` (new) | `organization_id`/`store_id` FKs → `organizations.id`/`stores.id`, both `ON DELETE RESTRICT` (previously-unresolved decision, confirmed by you this phase); unique `(store_id, email)`; unique `stripe_customer_id` (nullable-safe); index `organization_id`; `deleted_at` present (soft delete). |
+| `2026_08_26_220800_create_customer_addresses_table` | `customer_addresses` (new) | `customer_id` FK → `customers.id`, `ON DELETE CASCADE`; no `organization_id`/`store_id` (scoped via `customers` parent); no unique constraint (the "one `is_default` per customer" rule is an application invariant, not DB-enforced, per the design); index `customer_id`; no `deleted_at` (hard-delete child, not in the soft-delete table list). |
+
+Verification method: `php -l` on both files; `migrate --pretend` reviewed before running; `migrate` executed; `php artisan db:table <table>` run against both tables and cross-checked column-by-column against `docs/database/database-design.md`; `migrate:status` confirms both in batch 3 as `Ran`; `php artisan test` passes (2/2 — Laravel defaults only). No conflicts found between the implementation and Database Design 2.1.
+
+Not yet done (by design, next phases): Eloquent models, the address-service `is_default` invariant, RBAC/policies, TenantContext middleware, any seeders, and Phase 2C onward's tables.
 
 ## Not Started
 
-- Database migrations for the approved business schema (organizations, stores, users, customers, products, product options/variants, categories, carts, orders, payments, refunds, inventory, reports, etc.)
+- Database migrations for the approved business schema (products, product options/variants, categories, orders, payments, refunds, inventory, reports, etc.) — `platform_admins`, `organizations`, `stores`, `users` (soft-delete), `customers`, and `customer_addresses` are done, see Phase 2A/2B above. Note: `carts`/`cart_items` are **not** on this list at all — per Database Design 2.2, they are never migrated to MySQL; cart state is ephemeral (guest `localStorage`, authenticated Redis).
+- Platform Admin authentication, authorization, and API surface (`/api/platform/*`) — design only so far, per Database Design 2.1
 - Eloquent models
 - TenantContext / multi-tenancy middleware and Eloquent global scopes
 - RBAC / Policies
@@ -45,7 +86,7 @@ Write Laravel migrations directly from `docs/database/database-design.md`, once 
 - Customer authentication
 - Product management, product variants/options, categories, product images
 - Inventory management business logic
-- Cart / checkout business logic
+- Cart / checkout business logic — will use browser `localStorage` (guest) and Redis (authenticated, server-derived tenant/customer key) per Database Design 2.2, not MySQL `carts`/`cart_items` tables
 - Order business logic
 - Stripe integration (PaymentIntents, webhooks, refunds)
 - Business queue jobs
@@ -134,7 +175,8 @@ These are established and must not be silently changed by a future session. See 
 - Laravel is the only component with database access.
 - React communicates with Laravel exclusively through the API — no direct DB/Stripe/LLM access from the frontend.
 - MySQL is the durable source of truth.
-- Redis is used for cache, queue backend, and rate limiting, but is not a source of truth for anything.
+- Redis is used for cache, queue backend, rate limiting, and authenticated-customer cart storage (ephemeral, TTL'd, server-derived tenant/customer key — Database Design 2.2), but is not a source of truth for anything, including the cart role.
+- **Platform Admin is a third, structurally separate identity domain** — `platform_admins`, outside the Organization → Store → merchant-user hierarchy, with its own Sanctum guard. It is never merged into `users`/`organization_user`/`store_user`, never granted a role in the merchant RBAC ladder, and never evaluated against a tenant `TenantContext` (it isn't scoped to any organization/store).
 - Tenant context (organization, store, user, role) is resolved server-side, once per request, and bound for reuse by controllers, policies, scopes, and AI tools.
 - AI tools must never receive organization/store identity from the LLM — tenant context is injected server-side into every tool call.
 - The REST API and AI tools share the same authorization rules and the same underlying application services — there is no separate, looser data-access path for AI.
@@ -144,7 +186,8 @@ These are established and must not be silently changed by a future session. See 
 - Inventory mutation uses row-level locking (`SELECT ... FOR UPDATE`) plus an append-only transaction ledger (`inventory_transactions`); `inventory.quantity_on_hand` is a maintained materialization of that ledger.
 - Inventory is never directly modified by request handlers — all mutation goes through one locked service method.
 - Order totals are always calculated server-side, never accepted from the client.
-- No guest checkout for MVP — customer accounts are required.
+- No guest checkout for MVP — customer accounts are required. **Clarification (Database Design 2.2)**: guest browsing and guest cart-building (via `localStorage`) are permitted; "no guest checkout" refers only to the checkout/payment step itself, which always requires an authenticated `customers` account.
+- **Carts are not persisted in MySQL for MVP** (Database Design 2.2) — guest: `localStorage`; authenticated: Redis. Checkout treats cart contents as untrusted input and always revalidates `product_variant_id`/quantity and recalculates price/totals against MySQL. Do not reintroduce a MySQL `carts`/`cart_items` table without explicitly reconsidering and re-approving this architecture.
 - MVP does not use inventory reservations/soft-holds — inventory decrements only at the `paid` transition.
 - Analytics use direct transactional queries against MySQL with Redis cache-aside caching — no pre-aggregated/materialized rollup tables for MVP.
 - AI Q&A and Insights are not persisted for MVP — computed on demand, optionally Redis-cached.
@@ -152,7 +195,7 @@ These are established and must not be silently changed by a future session. See 
 
 ## Database Decisions
 
-Full detail lives in `docs/database/database-design.md` — this is a summary, not a substitute. Reflects **Database Design 2.0 (APPROVED)**.
+Full detail lives in `docs/database/database-design.md` — this is a summary, not a substitute. Reflects **Database Design 2.2 (APPROVED)**.
 
 ### Final Resolution — Order/Payment Status Separation (CLOSED)
 
@@ -166,11 +209,39 @@ Full detail lives in `docs/database/database-design.md` — this is a summary, n
 
 Full transition tables, webhook/refund/failed-payment/retry behavior, and diagrams: `docs/database/database-design.md` §"Order & Payment State Models — Authoritative Interaction Model."
 
-- **Tenant hierarchy**: `Organization → Store → store-scoped resources`.
-- **Tenant columns**: every top-level, independently-queried tenant-scoped table carries `organization_id` (and `store_id`, where applicable) directly — `products`, `categories`, `orders`, `payments`, `refunds`, and now `product_variants` (promoted in 2.0, since variants are queried independently — SKU lookups, low-stock reports — not only reached through a parent). Pure child/detail tables (`order_items`, `cart_items`, `product_images`, `inventory_transactions`, `product_options`, `product_option_values`, `product_variant_option_values`, `customer_addresses`, `payment_methods`, `order_addresses`) rely on their parent's tenant columns instead.
+### Platform Admin (Database Design 2.1, approved 2026-08-26)
+
+Identified and corrected before any Phase 2 migration was written — PRD.md originally described only Customer / Store Admin / Organization Owner (§3.1–3.3), with no platform-operator role. `platform_admins` is a new, standalone table:
+
+- No `organization_id`/`store_id` — ever. Never referenced by `organization_user`/`store_user` as a member.
+- No `role` column for MVP — a single flat Platform Admin capability set, not a tiered platform-role system (nothing requires that yet).
+- `organizations` gains a lifecycle: `status` (`pending`→`active`, or `rejected`/`suspended`), default `pending` — **a new organization requires Platform Admin approval before it can operate.**
+- Explicit per-action audit column pairs (not a single `reviewed_by`/`reviewed_at`, which would lose history across repeated status changes): `approved_at`/`approved_by_platform_admin_id`, `rejected_at`/`rejected_by_platform_admin_id`, `suspended_at`/`suspended_by_platform_admin_id`, plus `status_reason`. All three `*_by_platform_admin_id` columns are nullable FKs → `platform_admins.id`, `ON DELETE SET NULL`. Rejection got its own audit pair (not just `status_reason`) specifically for symmetry/accountability with approval — see `docs/database/database-design.md` for the full reasoning.
+- No separate `audit_logs` table added — these column pairs are the only lifecycle-audit facts currently required.
+- Three identity tables now exist platform-wide: `platform_admins`, `users` (merchant), `customers` (shopper) — each with its own Sanctum guard, all sharing Sanctum's existing polymorphic `personal_access_tokens` table (no schema change needed there).
+
+Full schema, rationale, and ERD: `docs/database/database-design.md`.
+
+### Cart Architecture (Database Design 2.2, approved 2026-08-26)
+
+Identified and approved before Phase 2D (Cart & Orders, not yet started) was reached — no migration existed for `carts`/`cart_items` at the time of this correction, so nothing needed to be reverted.
+
+- **No `carts`/`cart_items` MySQL tables.** Cart state for MVP is ephemeral: guest carts live in browser `localStorage`; authenticated-customer carts live in Redis, keyed by a **server-derived** tenant/customer namespace (never client-supplied), with a TTL.
+- **Redis remains non-durable, not a source of truth** — the cart role is held to the same standard as Redis's other three roles. Cart loss (eviction, TTL expiry, cleared browser) is an accepted, low-stakes failure mode; the durable record begins at the **pending order**, not at any cart representation.
+- **Cart contents are untrusted input.** Checkout reads only `product_variant_id`/quantity from the cart; price, availability, inventory, and totals are always revalidated/recalculated from MySQL — reinforcing, not changing, the existing "order totals always server-side" rule.
+- **No FK-based cleanup anymore** — a deleted/archived `product_variant` is not automatically pruned from a cart the way the old `CASCADE` FK on `cart_items` would have done; checkout (and any cart-read path) must defensively handle a stale `product_variant_id` reference.
+- **Intended concurrency primitive (not yet built)**: a Redis Hash per cart (field = `product_variant_id`, value = quantity), mutated via atomic `HINCRBY` — the same no-lost-update guarantee the old `unique(cart_id, product_variant_id)` + upsert pattern provided.
+- **Merge-on-login strategy** and **Redis eviction/isolation policy** (cache role vs. cart role sharing one Redis instance) are both **intentionally left as future implementation/operational decisions** — not resolved now.
+- **No guest checkout, unchanged**: guest browsing/cart-building is permitted; checkout still requires an authenticated `customers` account.
+- **Do not reintroduce a MySQL `carts`/`cart_items` table** without explicitly reconsidering and re-approving this architecture.
+
+Full schema-level rationale: `docs/database/database-design.md` §"Cart — intentionally NOT a MySQL table." Full architectural detail: `docs/architecture/system-architecture.md` §7 "Cart Architecture."
+
+- **Tenant hierarchy**: `Organization → Store → store-scoped resources`. Platform Admin (`platform_admins`) sits above this hierarchy, not inside it.
+- **Tenant columns**: every top-level, independently-queried tenant-scoped table carries `organization_id` (and `store_id`, where applicable) directly — `products`, `categories`, `orders`, `payments`, `refunds`, and now `product_variants` (promoted in 2.0, since variants are queried independently — SKU lookups, low-stock reports — not only reached through a parent). Pure child/detail tables (`order_items`, `product_images`, `inventory_transactions`, `product_options`, `product_option_values`, `product_variant_option_values`, `customer_addresses`, `payment_methods`, `order_addresses`) rely on their parent's tenant columns instead.
 - **Users vs. customers**: two separate identities, unchanged.
 - **RBAC structure / store-user assignment**: unchanged — `organization_user` (one org per user for MVP), `store_user`.
-- **The sellable unit is the Product Variant, not the Product** (Database Design 2.0's central change). `products` is catalog/marketing data only — no price, no SKU. `product_variants` carries the canonical `sku` and `price`; a product without meaningful variation still gets exactly one "default" variant, so there is only ever one inventory/pricing system, never two competing ones. `cart_items`, `order_items`, `inventory`, and `inventory_transactions` all reference `product_variant_id`.
+- **The sellable unit is the Product Variant, not the Product** (Database Design 2.0's central change). `products` is catalog/marketing data only — no price, no SKU. `product_variants` carries the canonical `sku` and `price`; a product without meaningful variation still gets exactly one "default" variant, so there is only ever one inventory/pricing system, never two competing ones. `order_items`, `inventory`, and `inventory_transactions` all reference `product_variant_id` (cart state also references it, ephemerally, outside MySQL — see Cart Architecture above).
 - **Product options/variants are relational, not JSON**: `product_options` → `product_option_values` → `product_variants` → `product_variant_option_values` (pivot). Options are scoped per-product (no shared global option library — avoids building a full PIM). Duplicate variant combinations are prevented by a database-enforced `unique(product_id, option_signature)`, where `option_signature` is an application-maintained, sorted signature of the variant's option-value set.
 - **Order creation before payment**: unchanged.
 - **Order item snapshots**: `order_items` now also snapshots `selected_options` (JSON — a frozen historical snapshot, not a live relational structure) alongside `product_name`, `sku` (the variant's SKU), and `unit_price`. Both `product_id` and `product_variant_id` are nullable with `ON DELETE SET NULL`.
@@ -202,7 +273,7 @@ None currently blocking. Two minor documentation-staleness items were noted duri
 | `CLAUDE.md` | Operating guidance for Claude Code in this repository — architecture summary, corrected technical decisions (Sanctum, payment flow, commands, frontend state, etc.), development rules, code-quality conventions, tech stack. |
 | `docs/architecture/architecture-review.md` | The authoritative review record — critical issues, recommended improvements, MVP decisions intentionally accepted, security risk ranking, scalability notes, interview/portfolio value, final score. |
 | `docs/architecture/system-architecture.md` | The resulting approved system design — component responsibilities, multi-tenancy, auth/RBAC, order/payment lifecycle, inventory/concurrency, Redis/queues, analytics, AI agent, API surface, frontend architecture. |
-| `docs/database/database-design.md` | The approved database schema (Database Design 2.0) — every table, ERD, state models, constraints, and concurrency considerations. No open decisions remain. |
+| `docs/database/database-design.md` | The approved database schema (Database Design 2.2) — every table, ERD, state models, constraints, and concurrency considerations. No open decisions remain. |
 | `docs/development/project-status.md` | This file — persistent development-state tracker, read/updated across sessions instead of relying on conversation memory. |
 | `docs/development/development-environment.md` | Permanent record of the verified local Docker development environment — exact versions, architecture, service config, credential flow, commands. |
 | `docs/api/`, `docs/decisions/`, `docs/development/` (besides this file) | Reserved, currently empty — for future API reference docs, architecture decision records, and other development documentation as the project progresses. |
