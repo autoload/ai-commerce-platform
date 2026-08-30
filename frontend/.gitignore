@@ -12,6 +12,10 @@ dist
 dist-ssr
 *.local
 
+# Local environment overrides (VITE_API_BASE_URL etc.) — .env.example
+# documents the placeholder values.
+.env
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

@@ -1,5 +1,6 @@
 <?php
 
+use App\Models\PlatformAdmin;
 use App\Models\User;
 
 return [
@@ -42,6 +43,24 @@ return [
             'driver' => 'session',
             'provider' => 'users',
         ],
+
+        /*
+        | Each identity domain (platform_admins, users, customers) gets its
+        | own sanctum-driver guard bound to its own provider. Sanctum's
+        | Guard::hasValidProvider() rejects a token whose tokenable model
+        | doesn't match the guard's provider model, so a token issued to a
+        | User is never valid on a route protected by "auth:platform_admin",
+        | and vice versa — see vendor/laravel/sanctum/src/Guard.php.
+        */
+        'platform_admin' => [
+            'driver' => 'sanctum',
+            'provider' => 'platform_admins',
+        ],
+
+        'merchant' => [
+            'driver' => 'sanctum',
+            'provider' => 'users',
+        ],
     ],
 
     /*
@@ -65,6 +84,11 @@ return [
         'users' => [
             'driver' => 'eloquent',
             'model' => env('AUTH_MODEL', User::class),
+        ],
+
+        'platform_admins' => [
+            'driver' => 'eloquent',
+            'model' => PlatformAdmin::class,
         ],
 
         // 'users' => [
