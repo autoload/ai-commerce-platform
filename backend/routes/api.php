@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\Merchant\MerchantAuthController;
 use App\Http\Controllers\Platform\PlatformAuthController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
@@ -9,6 +10,16 @@ use Illuminate\Support\Facades\Route;
 Route::get('/user', function (Request $request) {
     return $request->user('merchant');
 })->middleware('auth:merchant');
+
+Route::prefix('auth')->name('auth.')->group(function () {
+    Route::post('/register', [MerchantAuthController::class, 'register'])->name('register');
+    Route::post('/login', [MerchantAuthController::class, 'login'])->name('login');
+
+    Route::middleware(['auth:merchant', 'tenant.merchant'])->group(function () {
+        Route::post('/logout', [MerchantAuthController::class, 'logout'])->name('logout');
+        Route::get('/me', [MerchantAuthController::class, 'me'])->name('me');
+    });
+});
 
 Route::prefix('platform')->name('platform.')->group(function () {
     Route::post('/auth/login', [PlatformAuthController::class, 'login'])->name('auth.login');

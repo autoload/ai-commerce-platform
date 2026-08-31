@@ -1,4 +1,4 @@
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
+import { BrowserRouter, Navigate, Outlet, Route, Routes } from 'react-router-dom'
 import { AuthProvider } from './admin/auth/AuthContext'
 import { LoginPage } from './admin/auth/LoginPage'
 import { ProtectedRoute } from './admin/auth/ProtectedRoute'
@@ -6,6 +6,11 @@ import { DashboardPage } from './admin/dashboard/DashboardPage'
 import { AdminLayout } from './admin/layout/AdminLayout'
 import { ADMIN_NAV_ITEMS } from './admin/layout/navigation'
 import { ComingSoonPage } from './admin/pages/ComingSoonPage'
+import { MerchantLandingPage } from './merchant/MerchantLandingPage'
+import { MerchantAuthProvider } from './merchant/auth/MerchantAuthContext'
+import { MerchantLoginPage } from './merchant/auth/MerchantLoginPage'
+import { MerchantProtectedRoute } from './merchant/auth/MerchantProtectedRoute'
+import { MerchantRegisterPage } from './merchant/auth/MerchantRegisterPage'
 
 // Every nav item besides Dashboard is a placeholder until its feature
 // block is implemented — see docs/development/project-status.md.
@@ -36,6 +41,28 @@ function App() {
                 element={<ComingSoonPage label={item.label} />}
               />
             ))}
+          </Route>
+
+          {/* Merchant is a structurally separate identity domain from
+              Platform Admin — its own provider, its own routes, no shared
+              auth state. See merchant/auth/MerchantAuthContext.tsx. */}
+          <Route
+            element={
+              <MerchantAuthProvider>
+                <Outlet />
+              </MerchantAuthProvider>
+            }
+          >
+            <Route path="/merchant/login" element={<MerchantLoginPage />} />
+            <Route path="/merchant/register" element={<MerchantRegisterPage />} />
+            <Route
+              path="/merchant"
+              element={
+                <MerchantProtectedRoute>
+                  <MerchantLandingPage />
+                </MerchantProtectedRoute>
+              }
+            />
           </Route>
 
           <Route path="*" element={<Navigate to="/admin/dashboard" replace />} />
