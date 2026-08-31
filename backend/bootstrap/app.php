@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Middleware\ResolveCustomerContext;
 use App\Http\Middleware\ResolveMerchantStoreContext;
 use App\Http\Middleware\ResolveMerchantTenantContext;
 use Illuminate\Foundation\Application;
@@ -18,6 +19,7 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->alias([
             'tenant.merchant' => ResolveMerchantTenantContext::class,
             'tenant.merchant.store' => ResolveMerchantStoreContext::class,
+            'tenant.customer' => ResolveCustomerContext::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {

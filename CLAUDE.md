@@ -79,24 +79,29 @@ Three roles, strictly nested in capability, **merchant-side only**: **Organizati
 
 ### Payment → Order → Inventory Flow
 
+**Revised by Database Design 2.6 (design approved, NOT YET IMPLEMENTED — see `docs/database/database-design.md` §"Order & Payment State Models" §9–§14 for full detail).** The flow below supersedes an earlier version of this section that queued "Update Inventory" as a post-payment operation and created the pending order before the PaymentIntent — both changed for reasons explained below.
+
 ```
-Checkout
-  → Create Pending Order (status: pending / payment-required)
+Checkout (authenticated customer only)
   → Create Stripe PaymentIntent
+  → DB transaction: Create Pending Order + Order Items + Order Address
+       + Payment row + CLAIM inventory (atomic, locked, same transaction)
   → Customer completes payment
   → Stripe Webhook received
-  → Mark Order as Paid
+  → Mark Order as Paid (no inventory change — already claimed above)
   → Queue post-payment operations:
-       - Update Inventory
        - Update Analytics
        - Send Notifications
 ```
 
 Key constraints:
-- The order is created **before** payment, in a pending/payment-required state — it must not be created for the first time inside the webhook handler.
-- The webhook handler's job is to transition an existing order to Paid and enqueue the follow-on work; it should stay fast, and all heavier side effects belong in queue jobs.
+- **The Stripe PaymentIntent is created before the pending order**, not after. This lets the entire local write (order, items, address, payment, inventory claim, and its ledger row) be one single atomic transaction, since Stripe has already resolved by the time that transaction opens — the reverse ordering would force a second, separate transaction once Stripe responds, leaving a real intermediate state (a pending order with claimed inventory and no payment) that this ordering avoids entirely.
+- **Inventory is claimed atomically at checkout, in the same transaction as the pending order — never at the "mark as paid" step.** This closes a gap the original version of this flow had: decrementing only at payment success meant two competing pending orders could both reference the same stock, discoverable only if a payment later succeeded against depleted inventory. Claiming at checkout, under the same lock this section already requires, makes that conflict impossible to miss — it's caught at checkout time (rejected) or at retry time (order cancelled), never discovered later.
+- The order is created **before** payment is attempted, in a pending state — it must not be created for the first time inside the webhook handler.
+- The webhook handler's job is to transition an existing order to Paid and enqueue the follow-on work; it should stay fast, does **not** touch inventory (already claimed), and all heavier side effects (analytics, notifications) belong in queue jobs.
 - Stripe webhooks can be delivered more than once for the same event. Webhook processing must be idempotent (e.g. record processed event IDs, or make the "mark as paid" transition itself idempotent) — never assume at-most-once delivery.
-- Inventory decrements must use database transactions with appropriate row locking to prevent overselling and negative stock under concurrent purchases. This is a required correctness property, not a nice-to-have.
+- **A failed or cancelled payment attempt releases its inventory claim immediately**, not after an expiry window — holding it through a failure would let one customer with a failing card block every other customer from scarce/contended stock. A payment retry re-uses the same pending order but must atomically re-claim inventory before a new PaymentIntent is created; if the re-claim fails, the order is cancelled, and only then does the customer need to start a genuinely new checkout.
+- Inventory mutations (claim, release, or a future refund restoration) must use database transactions with appropriate row locking to prevent overselling and negative stock under concurrent purchases. This is a required correctness property, not a nice-to-have.
 
 ### AI Agent — Tool-Calling, Not Direct DB Access
 

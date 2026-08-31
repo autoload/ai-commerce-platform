@@ -10,17 +10,20 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Foundation\Auth\User as Authenticatable;
+use Laravel\Sanctum\HasApiTokens;
 
 /**
  * HasFactory exists strictly for test-fixture creation (Block 4C's Order
- * fixtures need a real customer row) — no customer-management feature.
+ * fixtures need a real customer row). HasApiTokens backs the "customer"
+ * Sanctum guard (config/auth.php) — a third, structurally separate identity
+ * domain from platform_admins/users, per CLAUDE.md.
  */
 #[Fillable(['name', 'email', 'phone', 'password'])]
 #[Hidden(['password'])]
 class Customer extends Authenticatable
 {
     /** @use HasFactory<CustomerFactory> */
-    use HasFactory, SoftDeletes;
+    use HasApiTokens, HasFactory, SoftDeletes;
 
     protected function casts(): array
     {

@@ -1,5 +1,6 @@
 <?php
 
+use App\Models\Customer;
 use App\Models\PlatformAdmin;
 use App\Models\User;
 
@@ -61,6 +62,11 @@ return [
             'driver' => 'sanctum',
             'provider' => 'users',
         ],
+
+        'customer' => [
+            'driver' => 'sanctum',
+            'provider' => 'customers',
+        ],
     ],
 
     /*
@@ -89,6 +95,11 @@ return [
         'platform_admins' => [
             'driver' => 'eloquent',
             'model' => PlatformAdmin::class,
+        ],
+
+        'customers' => [
+            'driver' => 'eloquent',
+            'model' => Customer::class,
         ],
 
         // 'users' => [

@@ -1,5 +1,7 @@
 <?php
 
+use App\Http\Controllers\Catalog\ProductController as CatalogProductController;
+use App\Http\Controllers\Customer\CustomerAuthController;
 use App\Http\Controllers\Merchant\InventoryController;
 use App\Http\Controllers\Merchant\MerchantAuthController;
 use App\Http\Controllers\Merchant\OrderController;
@@ -56,4 +58,22 @@ Route::prefix('platform')->name('platform.')->group(function () {
         Route::post('/auth/logout', [PlatformAuthController::class, 'logout'])->name('auth.logout');
         Route::get('/auth/me', [PlatformAuthController::class, 'me'])->name('auth.me');
     });
+});
+
+Route::prefix('customers')->name('customers.')->group(function () {
+    Route::post('/auth/register', [CustomerAuthController::class, 'register'])->name('auth.register');
+    Route::post('/auth/login', [CustomerAuthController::class, 'login'])->name('auth.login');
+
+    Route::middleware(['auth:customer', 'tenant.customer'])->group(function () {
+        Route::post('/auth/logout', [CustomerAuthController::class, 'logout'])->name('auth.logout');
+        Route::get('/auth/me', [CustomerAuthController::class, 'me'])->name('auth.me');
+    });
+});
+
+// Public, unauthenticated catalog browsing — no guard, distinct from the
+// merchant-only /api/stores/{store}/products above (same {store} scoping
+// discipline, different audience/URI namespace to avoid colliding with it).
+Route::prefix('shop')->name('shop.')->group(function () {
+    Route::get('/stores/{store}/products', [CatalogProductController::class, 'index'])->name('products.index');
+    Route::get('/stores/{store}/products/{product}', [CatalogProductController::class, 'show'])->name('products.show');
 });
