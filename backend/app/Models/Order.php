@@ -3,7 +3,9 @@
 namespace App\Models;
 
 use App\Enums\OrderStatus;
+use Database\Factories\OrderFactory;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
@@ -11,11 +13,16 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 /**
  * No fillable attributes — an order is a financial record that must only
  * ever be created by the (not-yet-built) CheckoutService with every
- * attribute set explicitly, never via mass assignment.
+ * attribute set explicitly, never via mass assignment. HasFactory exists
+ * strictly for test-fixture creation (Block 4C) — there is still no
+ * merchant-facing order-creation path.
  */
 #[Fillable([])]
 class Order extends Model
 {
+    /** @use HasFactory<OrderFactory> */
+    use HasFactory;
+
     protected function casts(): array
     {
         return [

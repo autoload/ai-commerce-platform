@@ -3,18 +3,15 @@
 namespace Tests\Feature\Merchant;
 
 use App\Enums\OrganizationRole;
-use App\Enums\OrganizationStatus;
-use App\Models\Organization;
-use App\Models\OrganizationUser;
 use App\Models\PlatformAdmin;
 use App\Models\Store;
-use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Concerns\CreatesTenantFixtures;
 use Tests\TestCase;
 
 class StoreTenantIsolationTest extends TestCase
 {
-    use RefreshDatabase;
+    use CreatesTenantFixtures, RefreshDatabase;
 
     public function test_client_supplied_organization_id_in_the_body_is_ignored_on_create(): void
     {
@@ -68,27 +65,5 @@ class StoreTenantIsolationTest extends TestCase
         $token = $admin->createToken('platform')->plainTextToken;
 
         $this->withToken($token)->getJson('/api/stores')->assertStatus(401);
-    }
-
-    private function activeOrganization(): Organization
-    {
-        $org = Organization::factory()->create();
-        $org->status = OrganizationStatus::Active;
-        $org->save();
-
-        return $org;
-    }
-
-    private function memberWithRole(Organization $org, OrganizationRole $role): User
-    {
-        $user = User::factory()->create();
-
-        $membership = new OrganizationUser;
-        $membership->organization_id = $org->id;
-        $membership->user_id = $user->id;
-        $membership->role = $role;
-        $membership->save();
-
-        return $user;
     }
 }

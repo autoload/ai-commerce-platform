@@ -4,15 +4,14 @@ namespace Tests\Unit\Policies;
 
 use App\Enums\OrganizationRole;
 use App\Models\Organization;
-use App\Models\OrganizationUser;
-use App\Models\User;
 use App\Policies\OrganizationPolicy;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Concerns\CreatesTenantFixtures;
 use Tests\TestCase;
 
 class OrganizationPolicyTest extends TestCase
 {
-    use RefreshDatabase;
+    use CreatesTenantFixtures, RefreshDatabase;
 
     private OrganizationPolicy $policy;
 
@@ -69,18 +68,5 @@ class OrganizationPolicyTest extends TestCase
         // including plain "view", must be denied against orgA.
         $this->assertFalse($this->policy->view($ownerOfB, $orgA));
         $this->assertFalse($this->policy->update($ownerOfB, $orgA));
-    }
-
-    private function memberWithRole(Organization $org, OrganizationRole $role): User
-    {
-        $user = User::factory()->create();
-
-        $membership = new OrganizationUser;
-        $membership->organization_id = $org->id;
-        $membership->user_id = $user->id;
-        $membership->role = $role;
-        $membership->save();
-
-        return $user;
     }
 }

@@ -2,18 +2,25 @@
 
 namespace App\Models;
 
+use Database\Factories\CustomerFactory;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Attributes\Hidden;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 
+/**
+ * HasFactory exists strictly for test-fixture creation (Block 4C's Order
+ * fixtures need a real customer row) — no customer-management feature.
+ */
 #[Fillable(['name', 'email', 'phone', 'password'])]
 #[Hidden(['password'])]
 class Customer extends Authenticatable
 {
-    use SoftDeletes;
+    /** @use HasFactory<CustomerFactory> */
+    use HasFactory, SoftDeletes;
 
     protected function casts(): array
     {

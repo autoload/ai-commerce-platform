@@ -3,7 +3,9 @@
 namespace App\Models;
 
 use App\Enums\CatalogStatus;
+use Database\Factories\ProductVariantFactory;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
@@ -19,7 +21,8 @@ use Illuminate\Database\Eloquent\SoftDeletes;
 #[Fillable(['sku', 'price', 'compare_at_price', 'status', 'sort_order'])]
 class ProductVariant extends Model
 {
-    use SoftDeletes;
+    /** @use HasFactory<ProductVariantFactory> */
+    use HasFactory, SoftDeletes;
 
     protected function casts(): array
     {

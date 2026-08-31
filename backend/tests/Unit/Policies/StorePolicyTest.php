@@ -5,17 +5,16 @@ namespace Tests\Unit\Policies;
 use App\Enums\OrganizationRole;
 use App\Enums\OrganizationStatus;
 use App\Models\Organization;
-use App\Models\OrganizationUser;
 use App\Models\Store;
 use App\Models\StoreUser;
-use App\Models\User;
 use App\Policies\StorePolicy;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Concerns\CreatesTenantFixtures;
 use Tests\TestCase;
 
 class StorePolicyTest extends TestCase
 {
-    use RefreshDatabase;
+    use CreatesTenantFixtures, RefreshDatabase;
 
     private StorePolicy $policy;
 
@@ -133,35 +132,5 @@ class StorePolicyTest extends TestCase
 
         $this->assertTrue($this->policy->viewAny($owner, $org));
         $this->assertTrue($this->policy->view($owner, $store));
-    }
-
-    private function activeOrganization(): Organization
-    {
-        $org = Organization::factory()->create();
-        $org->status = OrganizationStatus::Active;
-        $org->save();
-
-        return $org;
-    }
-
-    private function memberWithRole(Organization $org, OrganizationRole $role): User
-    {
-        $user = User::factory()->create();
-
-        $membership = new OrganizationUser;
-        $membership->organization_id = $org->id;
-        $membership->user_id = $user->id;
-        $membership->role = $role;
-        $membership->save();
-
-        return $user;
-    }
-
-    private function attachToStore(User $user, Store $store): void
-    {
-        $storeUser = new StoreUser;
-        $storeUser->user_id = $user->id;
-        $storeUser->store_id = $store->id;
-        $storeUser->save();
     }
 }

@@ -93,6 +93,21 @@ export function StoreDetailPage() {
         ← Back to stores
       </Link>
 
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Link
+          to={`/merchant/stores/${store.id}/products`}
+          className="block rounded-lg border border-slate-200 bg-white p-4 text-sm font-medium text-slate-900 shadow-sm transition hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
+        >
+          Products →
+        </Link>
+        <Link
+          to={`/merchant/stores/${store.id}/orders`}
+          className="block rounded-lg border border-slate-200 bg-white p-4 text-sm font-medium text-slate-900 shadow-sm transition hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
+        >
+          Orders →
+        </Link>
+      </div>
+
       <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
         {!isEditing ? (
           <div className="flex items-start justify-between">

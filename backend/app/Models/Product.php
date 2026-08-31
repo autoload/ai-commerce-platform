@@ -3,7 +3,9 @@
 namespace App\Models;
 
 use App\Enums\CatalogStatus;
+use Database\Factories\ProductFactory;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
@@ -12,7 +14,8 @@ use Illuminate\Database\Eloquent\SoftDeletes;
 #[Fillable(['name', 'slug', 'description', 'status', 'metadata', 'category_id'])]
 class Product extends Model
 {
-    use SoftDeletes;
+    /** @use HasFactory<ProductFactory> */
+    use HasFactory, SoftDeletes;
 
     protected function casts(): array
     {

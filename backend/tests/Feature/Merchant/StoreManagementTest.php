@@ -5,16 +5,14 @@ namespace Tests\Feature\Merchant;
 use App\Enums\OrganizationRole;
 use App\Enums\OrganizationStatus;
 use App\Models\Organization;
-use App\Models\OrganizationUser;
 use App\Models\Store;
-use App\Models\StoreUser;
-use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Concerns\CreatesTenantFixtures;
 use Tests\TestCase;
 
 class StoreManagementTest extends TestCase
 {
-    use RefreshDatabase;
+    use CreatesTenantFixtures, RefreshDatabase;
 
     public function test_owner_can_create_a_store_in_an_active_organization(): void
     {
@@ -264,35 +262,5 @@ class StoreManagementTest extends TestCase
         $this->getJson("/api/stores/{$store->id}")->assertStatus(401);
         $this->patchJson("/api/stores/{$store->id}", ['name' => 'x'])->assertStatus(401);
         $this->deleteJson("/api/stores/{$store->id}")->assertStatus(401);
-    }
-
-    private function activeOrganization(): Organization
-    {
-        $org = Organization::factory()->create();
-        $org->status = OrganizationStatus::Active;
-        $org->save();
-
-        return $org;
-    }
-
-    private function memberWithRole(Organization $org, OrganizationRole $role): User
-    {
-        $user = User::factory()->create();
-
-        $membership = new OrganizationUser;
-        $membership->organization_id = $org->id;
-        $membership->user_id = $user->id;
-        $membership->role = $role;
-        $membership->save();
-
-        return $user;
-    }
-
-    private function attachToStore(User $user, Store $store): void
-    {
-        $storeUser = new StoreUser;
-        $storeUser->user_id = $user->id;
-        $storeUser->store_id = $store->id;
-        $storeUser->save();
     }
 }
