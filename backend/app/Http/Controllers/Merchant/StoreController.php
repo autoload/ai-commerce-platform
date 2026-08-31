@@ -2,11 +2,16 @@
 
 namespace App\Http\Controllers\Merchant;
 
+use App\Enums\CatalogStatus;
+use App\Enums\OrderStatus;
 use App\Enums\OrganizationRole;
+use App\Exceptions\StoreHasActiveDependentsException;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Merchant\StoreCreateRequest;
 use App\Http\Requests\Merchant\StoreUpdateRequest;
 use App\Http\Resources\StoreResource;
+use App\Models\Order;
+use App\Models\Product;
 use App\Models\Store;
 use App\Support\TenantContext;
 use Illuminate\Http\JsonResponse;
@@ -98,15 +103,53 @@ class StoreController extends Controller
 
         Gate::authorize('delete', $store);
 
-        // No dependent-resource (Products/Orders/Customers/...) blocking
-        // check yet, per database-design.md's "Cascading soft-deletes"
-        // rule — those resources don't exist in Block 3. Add the guard
-        // here (before delete()) once they do.
+        try {
+            $this->assertNoActiveDependents($store);
+        } catch (StoreHasActiveDependentsException $e) {
+            abort(422, $e->getMessage());
+        }
+
         $store->delete();
 
         return response()->json([
             'message' => 'Store deleted.',
         ]);
+    }
+
+    /**
+     * Implements database-design.md's "Cascading soft-deletes — resolved"
+     * decision: deletion is blocked at the application layer while active
+     * resources exist under the store, rather than cascading. Categories
+     * and Customers are deliberately not checked here — neither has a
+     * merchant-facing archive/reassignment workflow yet, so there would be
+     * no way for an admin to ever satisfy such a block.
+     *
+     * @throws StoreHasActiveDependentsException
+     */
+    private function assertNoActiveDependents(Store $store): void
+    {
+        $hasNonArchivedProduct = Product::where('store_id', $store->id)
+            ->where('status', '!=', CatalogStatus::Archived->value)
+            ->exists();
+
+        if ($hasNonArchivedProduct) {
+            throw StoreHasActiveDependentsException::forActiveProducts();
+        }
+
+        $nonTerminalStatuses = [
+            OrderStatus::Pending->value,
+            OrderStatus::Paid->value,
+            OrderStatus::Processing->value,
+            OrderStatus::Shipped->value,
+        ];
+
+        $hasNonTerminalOrder = Order::where('store_id', $store->id)
+            ->whereIn('status', $nonTerminalStatuses)
+            ->exists();
+
+        if ($hasNonTerminalOrder) {
+            throw StoreHasActiveDependentsException::forNonTerminalOrders();
+        }
     }
 
     private function uniqueSlug(int $organizationId, string $name): string

@@ -2,11 +2,16 @@
 
 namespace Tests\Feature\Merchant;
 
+use App\Enums\CatalogStatus;
+use App\Enums\OrderStatus;
 use App\Enums\OrganizationRole;
 use App\Enums\OrganizationStatus;
+use App\Models\Order;
 use App\Models\Organization;
+use App\Models\Product;
 use App\Models\Store;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\Concerns\CreatesTenantFixtures;
 use Tests\TestCase;
 
@@ -250,6 +255,86 @@ class StoreManagementTest extends TestCase
 
         $response->assertStatus(403);
         $this->assertDatabaseHas('stores', ['id' => $store->id, 'deleted_at' => null]);
+    }
+
+    public function test_store_cannot_be_deleted_while_it_has_a_non_archived_product(): void
+    {
+        $org = $this->activeOrganization();
+        $owner = $this->memberWithRole($org, OrganizationRole::Owner);
+        $store = Store::factory()->forOrganization($org)->create();
+        Product::factory()->forStore($store)->create(); // defaults to status: draft
+        $token = $owner->createToken('t')->plainTextToken;
+
+        $response = $this->withToken($token)->deleteJson("/api/stores/{$store->id}");
+
+        $response->assertStatus(422);
+        $this->assertDatabaseHas('stores', ['id' => $store->id, 'deleted_at' => null]);
+    }
+
+    public function test_store_can_be_deleted_once_its_products_are_archived(): void
+    {
+        $org = $this->activeOrganization();
+        $owner = $this->memberWithRole($org, OrganizationRole::Owner);
+        $store = Store::factory()->forOrganization($org)->create();
+        $product = Product::factory()->forStore($store)->create();
+        $product->status = CatalogStatus::Archived;
+        $product->save();
+        $token = $owner->createToken('t')->plainTextToken;
+
+        $response = $this->withToken($token)->deleteJson("/api/stores/{$store->id}");
+
+        $response->assertOk();
+        $this->assertSoftDeleted('stores', ['id' => $store->id]);
+    }
+
+    /**
+     * @return array<string, array{OrderStatus}>
+     */
+    public static function nonTerminalOrderStatusProvider(): array
+    {
+        return [
+            'pending' => [OrderStatus::Pending],
+            'paid' => [OrderStatus::Paid],
+            'processing' => [OrderStatus::Processing],
+            'shipped' => [OrderStatus::Shipped],
+        ];
+    }
+
+    #[DataProvider('nonTerminalOrderStatusProvider')]
+    public function test_store_cannot_be_deleted_while_it_has_a_non_terminal_order(OrderStatus $status): void
+    {
+        $org = $this->activeOrganization();
+        $owner = $this->memberWithRole($org, OrganizationRole::Owner);
+        $store = Store::factory()->forOrganization($org)->create();
+        $order = Order::factory()->forStore($store)->create();
+        $order->status = $status;
+        $order->save();
+        $token = $owner->createToken('t')->plainTextToken;
+
+        $response = $this->withToken($token)->deleteJson("/api/stores/{$store->id}");
+
+        $response->assertStatus(422);
+        $this->assertDatabaseHas('stores', ['id' => $store->id, 'deleted_at' => null]);
+    }
+
+    public function test_store_can_be_deleted_when_all_orders_are_terminal(): void
+    {
+        $org = $this->activeOrganization();
+        $owner = $this->memberWithRole($org, OrganizationRole::Owner);
+        $store = Store::factory()->forOrganization($org)->create();
+
+        foreach ([OrderStatus::Completed, OrderStatus::Cancelled, OrderStatus::Refunded] as $status) {
+            $order = Order::factory()->forStore($store)->create();
+            $order->status = $status;
+            $order->save();
+        }
+
+        $token = $owner->createToken('t')->plainTextToken;
+
+        $response = $this->withToken($token)->deleteJson("/api/stores/{$store->id}");
+
+        $response->assertOk();
+        $this->assertSoftDeleted('stores', ['id' => $store->id]);
     }
 
     public function test_unauthenticated_requests_are_rejected_on_every_store_route(): void
