@@ -4,8 +4,8 @@ namespace App\Policies;
 
 use App\Enums\OrganizationRole;
 use App\Models\Organization;
-use App\Models\OrganizationUser;
 use App\Models\User;
+use App\Support\TenantAccess;
 
 /**
  * First Policy in the merchant RBAC layer — establishes the pattern later
@@ -49,11 +49,6 @@ class OrganizationPolicy
 
     private function roleFor(User $user, Organization $organization): ?OrganizationRole
     {
-        $membership = OrganizationUser::query()
-            ->where('user_id', $user->id)
-            ->where('organization_id', $organization->id)
-            ->first();
-
-        return $membership?->role;
+        return TenantAccess::roleFor($user, $organization);
     }
 }

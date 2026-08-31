@@ -11,6 +11,10 @@ import { MerchantAuthProvider } from './merchant/auth/MerchantAuthContext'
 import { MerchantLoginPage } from './merchant/auth/MerchantLoginPage'
 import { MerchantProtectedRoute } from './merchant/auth/MerchantProtectedRoute'
 import { MerchantRegisterPage } from './merchant/auth/MerchantRegisterPage'
+import { MerchantLayout } from './merchant/layout/MerchantLayout'
+import { StoreCreatePage } from './merchant/stores/StoreCreatePage'
+import { StoreDetailPage } from './merchant/stores/StoreDetailPage'
+import { StoreListPage } from './merchant/stores/StoreListPage'
 
 // Every nav item besides Dashboard is a placeholder until its feature
 // block is implemented — see docs/development/project-status.md.
@@ -63,6 +67,19 @@ function App() {
                 </MerchantProtectedRoute>
               }
             />
+
+            <Route
+              path="/merchant/stores"
+              element={
+                <MerchantProtectedRoute>
+                  <MerchantLayout />
+                </MerchantProtectedRoute>
+              }
+            >
+              <Route index element={<StoreListPage />} />
+              <Route path="new" element={<StoreCreatePage />} />
+              <Route path=":storeId" element={<StoreDetailPage />} />
+            </Route>
           </Route>
 
           <Route path="*" element={<Navigate to="/admin/dashboard" replace />} />

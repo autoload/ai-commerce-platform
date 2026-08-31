@@ -9,6 +9,7 @@ use App\Http\Requests\Merchant\MerchantRegisterRequest;
 use App\Models\Organization;
 use App\Models\OrganizationUser;
 use App\Models\User;
+use App\Support\TenantAccess;
 use App\Support\TenantContext;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -75,7 +76,7 @@ class MerchantAuthController extends Controller
         }
 
         $token = $user->createToken('merchant-session')->plainTextToken;
-        $membership = OrganizationUser::with('organization')->where('user_id', $user->id)->first();
+        $membership = TenantAccess::membershipFor($user);
 
         return response()->json([
             'token' => $token,

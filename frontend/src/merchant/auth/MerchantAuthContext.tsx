@@ -21,6 +21,7 @@ type MerchantAuthStatus = 'loading' | 'authenticated' | 'unauthenticated'
 
 type MerchantAuthContextValue = {
   status: MerchantAuthStatus
+  token: string | null
   user: MerchantUser | null
   organization: MerchantOrganization | null
   role: MerchantRole | null
@@ -118,6 +119,7 @@ export function MerchantAuthProvider({ children }: { children: ReactNode }) {
 
   const value: MerchantAuthContextValue = {
     status,
+    token,
     user: meQuery.data?.user ?? null,
     organization: meQuery.data?.organization ?? null,
     role: meQuery.data?.role ?? null,

@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Merchant\MerchantAuthController;
+use App\Http\Controllers\Merchant\StoreController;
 use App\Http\Controllers\Platform\PlatformAuthController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
@@ -18,6 +19,17 @@ Route::prefix('auth')->name('auth.')->group(function () {
     Route::middleware(['auth:merchant', 'tenant.merchant'])->group(function () {
         Route::post('/logout', [MerchantAuthController::class, 'logout'])->name('logout');
         Route::get('/me', [MerchantAuthController::class, 'me'])->name('me');
+    });
+});
+
+Route::middleware(['auth:merchant', 'tenant.merchant'])->group(function () {
+    Route::get('/stores', [StoreController::class, 'index'])->name('stores.index');
+    Route::post('/stores', [StoreController::class, 'store'])->name('stores.store');
+
+    Route::middleware('tenant.merchant.store')->group(function () {
+        Route::get('/stores/{store}', [StoreController::class, 'show'])->name('stores.show');
+        Route::patch('/stores/{store}', [StoreController::class, 'update'])->name('stores.update');
+        Route::delete('/stores/{store}', [StoreController::class, 'destroy'])->name('stores.destroy');
     });
 });
 

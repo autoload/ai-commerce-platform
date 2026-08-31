@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom'
 import { Card } from '../components/Card'
 import { useMerchantAuth } from './auth/MerchantAuthContext'
 
@@ -44,10 +45,17 @@ export function MerchantLandingPage() {
             </div>
           </dl>
 
+          <Link
+            to="/merchant/stores"
+            className="mt-6 block w-full rounded-md bg-indigo-600 px-3 py-2 text-center text-sm font-medium text-white transition hover:bg-indigo-500"
+          >
+            Manage stores
+          </Link>
+
           <button
             type="button"
             onClick={logout}
-            className="mt-6 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+            className="mt-3 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
           >
             Log out
           </button>

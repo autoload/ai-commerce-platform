@@ -2,7 +2,7 @@
 
 namespace App\Http\Middleware;
 
-use App\Models\OrganizationUser;
+use App\Support\TenantAccess;
 use App\Support\TenantContext;
 use Closure;
 use Illuminate\Http\Request;
@@ -22,9 +22,7 @@ class ResolveMerchantTenantContext
     {
         $user = $request->user('merchant');
 
-        $membership = OrganizationUser::with('organization')
-            ->where('user_id', $user->id)
-            ->first();
+        $membership = TenantAccess::membershipFor($user);
 
         if (! $membership || ! $membership->organization) {
             abort(403, 'No organization membership found for this account.');
