@@ -34,6 +34,11 @@ class InventoryTransaction extends Model
         return $this->belongsTo(OrderItem::class);
     }
 
+    public function payment(): BelongsTo
+    {
+        return $this->belongsTo(Payment::class);
+    }
+
     public function createdBy(): BelongsTo
     {
         return $this->belongsTo(User::class, 'created_by_user_id');

@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Catalog\ProductController as CatalogProductController;
+use App\Http\Controllers\Customer\CheckoutController;
 use App\Http\Controllers\Customer\CustomerAuthController;
 use App\Http\Controllers\Merchant\InventoryController;
 use App\Http\Controllers\Merchant\MerchantAuthController;
@@ -69,6 +70,12 @@ Route::prefix('customers')->name('customers.')->group(function () {
         Route::get('/auth/me', [CustomerAuthController::class, 'me'])->name('auth.me');
     });
 });
+
+// STEP 3B: checkout orchestration. Its own top-level resource, not nested
+// under /customers, matching system-architecture.md §10's API listing.
+Route::post('/checkout', [CheckoutController::class, 'store'])
+    ->middleware(['auth:customer', 'tenant.customer'])
+    ->name('checkout.store');
 
 // Public, unauthenticated catalog browsing — no guard, distinct from the
 // merchant-only /api/stores/{store}/products above (same {store} scoping

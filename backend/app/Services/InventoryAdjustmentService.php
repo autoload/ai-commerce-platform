@@ -6,22 +6,30 @@ use App\Enums\InventoryTransactionReason;
 use App\Exceptions\InsufficientInventoryException;
 use App\Models\Inventory;
 use App\Models\InventoryTransaction;
+use App\Models\OrderItem;
+use App\Models\Payment;
 use App\Models\ProductVariant;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
 
 /**
  * The single, locked path for every inventory quantity mutation in this
- * application — merchant-driven (Restock/Adjustment, this block) and,
- * later, system-driven (Sale/Refund from checkout/webhooks). Nothing else
- * is permitted to write quantity_on_hand directly; Inventory's own
- * fillable list is empty specifically to force every write through here.
+ * application — merchant-driven (Restock/Adjustment) and system-driven
+ * (Checkout/Release/Refund, from checkout/webhooks). Nothing else is
+ * permitted to write quantity_on_hand directly; Inventory's own fillable
+ * list is empty specifically to force every write through here.
  *
  * Per CLAUDE.md's required correctness property: transaction + row lock +
  * quantity update + ledger insert, atomically. The reason a caller may use
- * is NOT restricted here — Sale/Refund will need this same service later
- * unchanged — restriction to Restock/Adjustment for merchant requests is
- * enforced one layer up, in InventoryAdjustRequest's validation.
+ * is NOT restricted here — restriction to Restock/Adjustment for merchant
+ * requests is enforced one layer up, in InventoryAdjustRequest's validation.
+ *
+ * $orderItem/$payment are supplied only for Checkout/Release/Refund
+ * claims (database-design.md §9) — they populate inventory_transactions'
+ * order_id/order_item_id/payment_id, which the CHECK constraint requires
+ * to be non-null for exactly those three reasons and which the generated
+ * dedup_key column keys on. Restock/Adjustment leave both null, unchanged
+ * from before this parameter existed.
  */
 class InventoryAdjustmentService
 {
@@ -34,8 +42,10 @@ class InventoryAdjustmentService
         InventoryTransactionReason $reason,
         ?string $note,
         ?User $actor,
+        ?OrderItem $orderItem = null,
+        ?Payment $payment = null,
     ): Inventory {
-        return DB::transaction(function () use ($variant, $delta, $reason, $note, $actor) {
+        return DB::transaction(function () use ($variant, $delta, $reason, $note, $actor, $orderItem, $payment) {
             // Ensure a row exists before attempting to lock it — inventory
             // rows are lazily materialized on first adjustment, not created
             // eagerly when a variant is created. insertOrIgnore is a raw
@@ -67,6 +77,9 @@ class InventoryAdjustmentService
 
             $transaction = new InventoryTransaction;
             $transaction->product_variant_id = $variant->id;
+            $transaction->order_id = $orderItem?->order_id;
+            $transaction->order_item_id = $orderItem?->id;
+            $transaction->payment_id = $payment?->id;
             $transaction->delta = $delta;
             $transaction->reason = $reason;
             $transaction->note = $note;
