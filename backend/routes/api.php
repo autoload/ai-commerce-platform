@@ -9,6 +9,7 @@ use App\Http\Controllers\Merchant\OrderController;
 use App\Http\Controllers\Merchant\ProductController;
 use App\Http\Controllers\Merchant\StoreController;
 use App\Http\Controllers\Platform\PlatformAuthController;
+use App\Http\Controllers\Webhooks\StripeWebhookController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
@@ -76,6 +77,16 @@ Route::prefix('customers')->name('customers.')->group(function () {
 Route::post('/checkout', [CheckoutController::class, 'store'])
     ->middleware(['auth:customer', 'tenant.customer'])
     ->name('checkout.store');
+
+// STEP 3C: Stripe webhook. Deliberately unauthenticated and untenanted —
+// Stripe cannot authenticate via any of this app's guards, and Stripe's
+// signature verification (inside the controller) is the entire trust
+// boundary. No auth:*/tenant.* middleware, matching system-architecture.md
+// §10 ("the Stripe webhook route is the one deliberate exception to normal
+// auth — excluded from Sanctum/CSRF, verified by Stripe's signature
+// instead"). API routes carry no CSRF middleware in this Laravel version
+// regardless, so nothing extra needs excluding here.
+Route::post('/webhooks/stripe', [StripeWebhookController::class, 'handle'])->name('webhooks.stripe');
 
 // Public, unauthenticated catalog browsing — no guard, distinct from the
 // merchant-only /api/stores/{store}/products above (same {store} scoping
