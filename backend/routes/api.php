@@ -3,6 +3,7 @@
 use App\Http\Controllers\Catalog\ProductController as CatalogProductController;
 use App\Http\Controllers\Customer\CheckoutController;
 use App\Http\Controllers\Customer\CustomerAuthController;
+use App\Http\Controllers\Customer\RetryPaymentController;
 use App\Http\Controllers\Merchant\InventoryController;
 use App\Http\Controllers\Merchant\MerchantAuthController;
 use App\Http\Controllers\Merchant\OrderController;
@@ -77,6 +78,14 @@ Route::prefix('customers')->name('customers.')->group(function () {
 Route::post('/checkout', [CheckoutController::class, 'store'])
     ->middleware(['auth:customer', 'tenant.customer'])
     ->name('checkout.store');
+
+// Phase 3 STEP 3D: payment retry. {order} is resolved and scoped to the
+// authenticated customer inside RetryPaymentController itself (not via
+// implicit route-model binding), matching every other resource-resolution
+// convention in this codebase.
+Route::post('/orders/{order}/payment-retry', [RetryPaymentController::class, 'store'])
+    ->middleware(['auth:customer', 'tenant.customer'])
+    ->name('orders.paymentRetry');
 
 // STEP 3C: Stripe webhook. Deliberately unauthenticated and untenanted —
 // Stripe cannot authenticate via any of this app's guards, and Stripe's
