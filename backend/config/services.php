@@ -39,6 +39,11 @@ return [
         'key' => env('STRIPE_KEY'),
         'secret' => env('STRIPE_SECRET'),
         'webhook_secret' => env('STRIPE_WEBHOOK_SECRET'),
+        // Phase 6 (database-design.md §12): minutes a Payment may remain
+        // `requires_payment` before the expiry sweep treats it as
+        // abandoned. Anchored to the Payment's created_at, never the
+        // Order's — a retry legitimately restarts this window.
+        'checkout_expiry_minutes' => (int) env('STRIPE_CHECKOUT_EXPIRY_MINUTES', 30),
     ],
 
 ];

@@ -23,4 +23,14 @@ class StripeApiPaymentIntentGateway implements StripePaymentIntentGateway
             'idempotency_key' => $idempotencyKey,
         ]);
     }
+
+    public function retrieve(string $stripePaymentIntentId): PaymentIntent
+    {
+        return $this->stripe->paymentIntents->retrieve($stripePaymentIntentId);
+    }
+
+    public function cancel(string $stripePaymentIntentId): PaymentIntent
+    {
+        return $this->stripe->paymentIntents->cancel($stripePaymentIntentId);
+    }
 }

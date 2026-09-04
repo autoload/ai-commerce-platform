@@ -504,6 +504,16 @@ class PaymentRetryTest extends TestCase
                     'status' => 'requires_payment_method',
                 ]);
             }
+
+            public function retrieve(string $stripePaymentIntentId): PaymentIntent
+            {
+                throw new \LogicException('retrieve() is not exercised by this lock-timing test.');
+            }
+
+            public function cancel(string $stripePaymentIntentId): PaymentIntent
+            {
+                throw new \LogicException('cancel() is not exercised by this lock-timing test.');
+            }
         };
 
         $this->app->instance(StripePaymentIntentGateway::class, $gateway);
