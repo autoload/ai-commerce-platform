@@ -3,6 +3,7 @@
 use App\Http\Controllers\Catalog\ProductController as CatalogProductController;
 use App\Http\Controllers\Customer\CheckoutController;
 use App\Http\Controllers\Customer\CustomerAuthController;
+use App\Http\Controllers\Customer\OrderController as CustomerOrderController;
 use App\Http\Controllers\Customer\RetryPaymentController;
 use App\Http\Controllers\Merchant\InventoryController;
 use App\Http\Controllers\Merchant\MerchantAuthController;
@@ -70,6 +71,9 @@ Route::prefix('customers')->name('customers.')->group(function () {
     Route::middleware(['auth:customer', 'tenant.customer'])->group(function () {
         Route::post('/auth/logout', [CustomerAuthController::class, 'logout'])->name('auth.logout');
         Route::get('/auth/me', [CustomerAuthController::class, 'me'])->name('auth.me');
+
+        Route::get('/orders', [CustomerOrderController::class, 'index'])->name('orders.index');
+        Route::get('/orders/{order}', [CustomerOrderController::class, 'show'])->name('orders.show');
     });
 });
 

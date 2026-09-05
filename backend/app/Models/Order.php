@@ -9,6 +9,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 /**
  * No fillable attributes — an order is a financial record that must only
@@ -64,6 +65,18 @@ class Order extends Model
     public function payments(): HasMany
     {
         return $this->hasMany(Payment::class);
+    }
+
+    /**
+     * The most recent payment attempt (by created_at), per "one Payment =
+     * one attempt" (a retry always inserts a new row, never mutates a
+     * terminal one). Used to derive a customer-visible payment status —
+     * never stored, per database-design.md's "payment status is derived,
+     * never stored" rule.
+     */
+    public function latestPayment(): HasOne
+    {
+        return $this->hasOne(Payment::class)->latestOfMany();
     }
 
     public function refunds(): HasMany
