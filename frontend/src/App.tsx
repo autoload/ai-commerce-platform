@@ -11,6 +11,8 @@ import { CustomerAuthProvider } from './customer/auth/CustomerAuthContext'
 import { CustomerLoginPage } from './customer/auth/CustomerLoginPage'
 import { CustomerProtectedRoute } from './customer/auth/CustomerProtectedRoute'
 import { CustomerRegisterPage } from './customer/auth/CustomerRegisterPage'
+import { CartPage } from './customer/cart/CartPage'
+import { CartProvider } from './customer/cart/CartContext'
 import { ProductDetailPage as CatalogProductDetailPage } from './customer/catalog/ProductDetailPage'
 import { ProductListPage as CatalogProductListPage } from './customer/catalog/ProductListPage'
 import { HomePage as StorefrontHomePage } from './customer/layout/HomePage'
@@ -112,18 +114,24 @@ function App() {
               CustomerAuthProvider reads storeId from this route's own
               param to scope its token storage and API calls. Catalog
               browsing (Block 8A) stays public; login/register are public;
-              only /account is behind CustomerProtectedRoute. */}
+              only /account is behind CustomerProtectedRoute. CartProvider
+              (Block 8B) is a separate, localStorage-only provider — no
+              relation to auth state; guest and authenticated customers
+              share the exact same store-scoped cart. */}
           <Route
             path="/store/:storeId"
             element={
               <CustomerAuthProvider>
-                <StorefrontLayout />
+                <CartProvider>
+                  <StorefrontLayout />
+                </CartProvider>
               </CustomerAuthProvider>
             }
           >
             <Route index element={<StorefrontHomePage />} />
             <Route path="products" element={<CatalogProductListPage />} />
             <Route path="products/:productId" element={<CatalogProductDetailPage />} />
+            <Route path="cart" element={<CartPage />} />
             <Route path="login" element={<CustomerLoginPage />} />
             <Route path="register" element={<CustomerRegisterPage />} />
             <Route

@@ -1,15 +1,16 @@
 import { Link, Outlet, useParams } from 'react-router-dom'
+import { useCart } from '../cart/CartContext'
 import { useCustomerAuth } from '../auth/CustomerAuthContext'
 
 // Deliberately minimal chrome, mirroring MerchantLayout's approach for its
-// own subtree. No cart badge yet — that lands with Block 8B, not before.
-// No public "get store" endpoint exists to fetch a display name from for an
-// unauthenticated visitor, so the header falls back to "Store #{id}" until
-// an authenticated /me response supplies the real name.
+// own subtree. No public "get store" endpoint exists to fetch a display
+// name from for an unauthenticated visitor, so the header falls back to
+// "Store #{id}" until an authenticated /me response supplies the real name.
 export function StorefrontLayout() {
   const params = useParams<{ storeId: string }>()
   const storeId = params.storeId
   const { status, customer, store, logout } = useCustomerAuth()
+  const { itemCount } = useCart()
 
   return (
     <div className="min-h-svh bg-slate-50 dark:bg-slate-950">
@@ -27,6 +28,13 @@ export function StorefrontLayout() {
         </div>
 
         <div className="flex items-center gap-4">
+          <Link
+            to={`/store/${storeId}/cart`}
+            className="text-sm text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100"
+          >
+            Cart{itemCount > 0 ? ` (${itemCount})` : ''}
+          </Link>
+
           {status === 'authenticated' && (
             <>
               <Link
