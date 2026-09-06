@@ -84,14 +84,12 @@ export function CartPage() {
             </span>
           </div>
 
-          <button
-            type="button"
-            disabled
-            title="Checkout is not available yet."
-            className="w-full cursor-not-allowed rounded-md bg-indigo-600 px-3 py-2 text-sm font-medium text-white opacity-50"
+          <Link
+            to={`/store/${storeId}/checkout`}
+            className="block w-full rounded-md bg-indigo-600 px-3 py-2 text-center text-sm font-medium text-white transition hover:bg-indigo-500"
           >
-            Checkout (coming soon)
-          </button>
+            Checkout
+          </Link>
         </>
       )}
     </div>

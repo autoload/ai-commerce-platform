@@ -13,6 +13,10 @@ type CartContextValue = {
   decrementItem: (variantId: number) => void
   setItemQuantity: (variantId: number, quantity: number) => void
   removeItem: (variantId: number) => void
+  // Block 8D: called only after checkout reaches a confirmed-successful
+  // payment state — never on validation failure, payment failure, or
+  // merely submitting the checkout request. See CheckoutForm.tsx.
+  clearCart: () => void
 }
 
 const CartContext = createContext<CartContextValue | null>(null)
@@ -100,6 +104,10 @@ export function CartProvider({ children }: { children: ReactNode }) {
     [items, persist],
   )
 
+  const clearCart = useCallback(() => {
+    persist([])
+  }, [persist])
+
   const itemCount = useMemo(() => items.reduce((sum, line) => sum + line.quantity, 0), [items])
 
   // Display-only subtotal computed from the stored price snapshot — never
@@ -118,6 +126,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
     decrementItem,
     setItemQuantity,
     removeItem,
+    clearCart,
   }
 
   return <CartContext.Provider value={value}>{children}</CartContext.Provider>

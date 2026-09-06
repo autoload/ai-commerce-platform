@@ -34,6 +34,7 @@ type CustomerRegisterInput = {
 type CustomerAuthContextValue = {
   status: CustomerAuthStatus
   storeId: number
+  token: string | null
   customer: Customer | null
   store: CustomerStore | null
   login: (email: string, password: string) => Promise<void>
@@ -140,6 +141,7 @@ export function CustomerAuthProvider({ children }: { children: ReactNode }) {
   const value: CustomerAuthContextValue = {
     status,
     storeId,
+    token,
     customer: meQuery.data?.customer ?? null,
     store: meQuery.data?.store ?? null,
     login: async (email, password) => {

@@ -16,6 +16,10 @@ type RequestOptions = {
   method?: 'GET' | 'POST' | 'PATCH' | 'DELETE'
   body?: unknown
   token?: string | null
+  // Additive — e.g. checkout's required `Idempotency-Key` header. Merged
+  // in after the standard headers below so a caller could in principle
+  // override them, though no current caller does.
+  headers?: Record<string, string>
 }
 
 type ErrorPayload = {
@@ -24,7 +28,7 @@ type ErrorPayload = {
 }
 
 export async function apiRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { method = 'GET', body, token } = options
+  const { method = 'GET', body, token, headers } = options
 
   let response: Response
   try {
@@ -34,6 +38,7 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
         Accept: 'application/json',
         ...(body ? { 'Content-Type': 'application/json' } : {}),
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...headers,
       },
       body: body ? JSON.stringify(body) : undefined,
     })

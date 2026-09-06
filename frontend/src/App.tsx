@@ -15,6 +15,7 @@ import { CartPage } from './customer/cart/CartPage'
 import { CartProvider } from './customer/cart/CartContext'
 import { ProductDetailPage as CatalogProductDetailPage } from './customer/catalog/ProductDetailPage'
 import { ProductListPage as CatalogProductListPage } from './customer/catalog/ProductListPage'
+import { CheckoutPage } from './customer/checkout/CheckoutPage'
 import { HomePage as StorefrontHomePage } from './customer/layout/HomePage'
 import { StorefrontLayout } from './customer/layout/StorefrontLayout'
 import { MerchantLandingPage } from './merchant/MerchantLandingPage'
@@ -132,6 +133,14 @@ function App() {
             <Route path="products" element={<CatalogProductListPage />} />
             <Route path="products/:productId" element={<CatalogProductDetailPage />} />
             <Route path="cart" element={<CartPage />} />
+            <Route
+              path="checkout"
+              element={
+                <CustomerProtectedRoute>
+                  <CheckoutPage />
+                </CustomerProtectedRoute>
+              }
+            />
             <Route path="login" element={<CustomerLoginPage />} />
             <Route path="register" element={<CustomerRegisterPage />} />
             <Route
