@@ -6,6 +6,11 @@ import { DashboardPage } from './admin/dashboard/DashboardPage'
 import { AdminLayout } from './admin/layout/AdminLayout'
 import { ADMIN_NAV_ITEMS } from './admin/layout/navigation'
 import { ComingSoonPage } from './admin/pages/ComingSoonPage'
+import { AccountPage as CustomerAccountPage } from './customer/auth/AccountPage'
+import { CustomerAuthProvider } from './customer/auth/CustomerAuthContext'
+import { CustomerLoginPage } from './customer/auth/CustomerLoginPage'
+import { CustomerProtectedRoute } from './customer/auth/CustomerProtectedRoute'
+import { CustomerRegisterPage } from './customer/auth/CustomerRegisterPage'
 import { ProductDetailPage as CatalogProductDetailPage } from './customer/catalog/ProductDetailPage'
 import { ProductListPage as CatalogProductListPage } from './customer/catalog/ProductListPage'
 import { HomePage as StorefrontHomePage } from './customer/layout/HomePage'
@@ -98,16 +103,37 @@ function App() {
             </Route>
           </Route>
 
-          {/* Customer-facing storefront — a public, unauthenticated area
-              (Block 8A: catalog browsing only) structurally separate from
-              both Platform Admin and Merchant. Every route is store-scoped
-              since customer identity itself is permanently store-bound
-              (customers.email is unique per store, not globally) — see
-              Block 8C onward for the auth layer this will eventually gain. */}
-          <Route path="/store/:storeId" element={<StorefrontLayout />}>
+          {/* Customer-facing storefront — structurally separate from both
+              Platform Admin and Merchant, with its own auth provider
+              (CustomerAuthProvider), never nested inside
+              MerchantAuthProvider. Every route is store-scoped since
+              customer identity itself is permanently store-bound
+              (customers.email is unique per store, not globally) —
+              CustomerAuthProvider reads storeId from this route's own
+              param to scope its token storage and API calls. Catalog
+              browsing (Block 8A) stays public; login/register are public;
+              only /account is behind CustomerProtectedRoute. */}
+          <Route
+            path="/store/:storeId"
+            element={
+              <CustomerAuthProvider>
+                <StorefrontLayout />
+              </CustomerAuthProvider>
+            }
+          >
             <Route index element={<StorefrontHomePage />} />
             <Route path="products" element={<CatalogProductListPage />} />
             <Route path="products/:productId" element={<CatalogProductDetailPage />} />
+            <Route path="login" element={<CustomerLoginPage />} />
+            <Route path="register" element={<CustomerRegisterPage />} />
+            <Route
+              path="account"
+              element={
+                <CustomerProtectedRoute>
+                  <CustomerAccountPage />
+                </CustomerProtectedRoute>
+              }
+            />
           </Route>
 
           <Route path="*" element={<Navigate to="/admin/dashboard" replace />} />
