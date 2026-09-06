@@ -12,6 +12,12 @@ dist
 dist-ssr
 *.local
 
+# Playwright
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+
 # Local environment overrides (VITE_API_BASE_URL etc.) — .env.example
 # documents the placeholder values.
 .env
