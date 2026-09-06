@@ -82,6 +82,7 @@ class ProductController extends Controller
             'options.values' => fn ($query) => $query->orderBy('sort_order'),
             'variants' => fn ($query) => $query->where('status', CatalogStatus::Active)->orderBy('sort_order'),
             'variants.optionValues.option',
+            'variants.inventory',
         ];
     }
 }

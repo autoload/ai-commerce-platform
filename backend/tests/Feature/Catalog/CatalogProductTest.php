@@ -246,7 +246,7 @@ class CatalogProductTest extends TestCase
             'data' => [
                 'id', 'name', 'slug', 'description', 'category',
                 'images', 'options',
-                'variants' => [['id', 'sku', 'price', 'compare_at_price', 'options']],
+                'variants' => [['id', 'sku', 'price', 'compare_at_price', 'in_stock', 'options']],
             ],
         ])->assertJsonPath('data.variants.0.sku', 'ABC-123');
     }
@@ -314,7 +314,78 @@ class CatalogProductTest extends TestCase
             ->assertJsonPath('data.variants.0.options.0.value', 'Red');
     }
 
-    // --- E. Performance --------------------------------------------------
+    // --- E. Public availability signal (in_stock) ------------------------
+
+    public function test_variant_with_positive_quantity_on_hand_is_in_stock(): void
+    {
+        $store = $this->activeStore();
+        $product = $this->activeProduct($store);
+        $variant = $this->activeVariant($product);
+        DB::table('inventory')->insert([
+            'product_variant_id' => $variant->id,
+            'quantity_on_hand' => 5,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $response = $this->getJson("/api/shop/stores/{$store->id}/products/{$product->id}");
+
+        $response->assertOk()->assertJsonPath('data.variants.0.in_stock', true);
+    }
+
+    public function test_variant_with_zero_quantity_on_hand_is_out_of_stock(): void
+    {
+        $store = $this->activeStore();
+        $product = $this->activeProduct($store);
+        $variant = $this->activeVariant($product);
+        DB::table('inventory')->insert([
+            'product_variant_id' => $variant->id,
+            'quantity_on_hand' => 0,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $response = $this->getJson("/api/shop/stores/{$store->id}/products/{$product->id}");
+
+        $response->assertOk()->assertJsonPath('data.variants.0.in_stock', false);
+    }
+
+    public function test_variant_with_no_inventory_row_yet_is_out_of_stock(): void
+    {
+        // Inventory rows are lazily materialized on first adjustment
+        // (InventoryAdjustmentService) — a never-adjusted variant has no
+        // row at all, not a row with quantity_on_hand = 0.
+        $store = $this->activeStore();
+        $product = $this->activeProduct($store);
+        $this->activeVariant($product);
+
+        $response = $this->getJson("/api/shop/stores/{$store->id}/products/{$product->id}");
+
+        $response->assertOk()->assertJsonPath('data.variants.0.in_stock', false);
+    }
+
+    public function test_exact_quantity_on_hand_is_never_exposed(): void
+    {
+        $store = $this->activeStore();
+        $product = $this->activeProduct($store);
+        $variant = $this->activeVariant($product);
+        DB::table('inventory')->insert([
+            'product_variant_id' => $variant->id,
+            'quantity_on_hand' => 42,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $response = $this->getJson("/api/shop/stores/{$store->id}/products/{$product->id}");
+
+        $response->assertOk();
+        $variantJson = $response->json('data.variants.0');
+        $this->assertArrayNotHasKey('quantity_on_hand', $variantJson);
+        $this->assertArrayNotHasKey('low_stock_threshold', $variantJson);
+        $this->assertStringNotContainsString('42', $response->getContent());
+    }
+
+    // --- F. Performance --------------------------------------------------
 
     public function test_listing_does_not_grow_query_count_with_more_products(): void
     {

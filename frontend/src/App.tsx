@@ -6,6 +6,10 @@ import { DashboardPage } from './admin/dashboard/DashboardPage'
 import { AdminLayout } from './admin/layout/AdminLayout'
 import { ADMIN_NAV_ITEMS } from './admin/layout/navigation'
 import { ComingSoonPage } from './admin/pages/ComingSoonPage'
+import { ProductDetailPage as CatalogProductDetailPage } from './customer/catalog/ProductDetailPage'
+import { ProductListPage as CatalogProductListPage } from './customer/catalog/ProductListPage'
+import { HomePage as StorefrontHomePage } from './customer/layout/HomePage'
+import { StorefrontLayout } from './customer/layout/StorefrontLayout'
 import { MerchantLandingPage } from './merchant/MerchantLandingPage'
 import { MerchantAuthProvider } from './merchant/auth/MerchantAuthContext'
 import { MerchantLoginPage } from './merchant/auth/MerchantLoginPage'
@@ -92,6 +96,18 @@ function App() {
               <Route path=":storeId/orders" element={<OrderListPage />} />
               <Route path=":storeId/orders/:orderId" element={<OrderDetailPage />} />
             </Route>
+          </Route>
+
+          {/* Customer-facing storefront — a public, unauthenticated area
+              (Block 8A: catalog browsing only) structurally separate from
+              both Platform Admin and Merchant. Every route is store-scoped
+              since customer identity itself is permanently store-bound
+              (customers.email is unique per store, not globally) — see
+              Block 8C onward for the auth layer this will eventually gain. */}
+          <Route path="/store/:storeId" element={<StorefrontLayout />}>
+            <Route index element={<StorefrontHomePage />} />
+            <Route path="products" element={<CatalogProductListPage />} />
+            <Route path="products/:productId" element={<CatalogProductDetailPage />} />
           </Route>
 
           <Route path="*" element={<Navigate to="/admin/dashboard" replace />} />

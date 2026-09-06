@@ -15,8 +15,17 @@ use Illuminate\Http\Resources\Json\JsonResource;
  * convention for items/shipping_address.
  *
  * Callers must eager-load category, images, options.values, and
- * variants.optionValues.option — this resource only reads what's already
- * loaded, it never triggers its own queries.
+ * variants.optionValues.option/variants.inventory — this resource only
+ * reads what's already loaded, it never triggers its own queries.
+ *
+ * `in_stock` is a coarse boolean derived from quantity_on_hand (an
+ * inventory row is lazily materialized on first adjustment — see
+ * InventoryAdjustmentService — so a variant with no row yet is treated as
+ * out of stock, matching checkout's own "nothing claimable" behavior).
+ * The exact quantity is never exposed here; it stays merchant-only data
+ * (App\Http\Resources\InventoryResource). This flag is a display hint
+ * only — checkout independently re-validates availability under a row
+ * lock regardless of what this endpoint returned.
  *
  * @mixin Product
  */
@@ -56,6 +65,7 @@ class CatalogProductResource extends JsonResource
                 'sku' => $variant->sku,
                 'price' => $variant->price,
                 'compare_at_price' => $variant->compare_at_price,
+                'in_stock' => (bool) ($variant->inventory?->quantity_on_hand > 0),
                 'options' => $variant->optionValues->map(fn ($optionValue) => [
                     'option' => $optionValue->option->name,
                     'value' => $optionValue->value,
