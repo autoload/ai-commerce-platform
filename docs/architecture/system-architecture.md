@@ -126,7 +126,7 @@ Tools: `getSales`, `getOrders`, `getProducts`, `getCustomers`, `getRefunds`, `ge
 
 ## 10. API Architecture
 
-Resource groups: `/api/auth/*`, `/api/organizations`, `/api/stores`, `/api/products`, `/api/categories`, `/api/cart`, `/api/checkout`, `/api/webhooks/stripe`, `/api/orders`, `/api/customers`, `/api/me/orders`, `/api/inventory`, `/api/analytics/*`, `/api/ai/*` (ask, investigate, reports). `/api/cart` now fronts the Redis-backed authenticated cart (§7), not a MySQL resource.
+Resource groups: `/api/auth/*`, `/api/organizations`, `/api/stores`, `/api/products`, `/api/categories`, `/api/cart`, `/api/checkout`, `/api/webhooks/stripe`, `/api/orders`, `/api/customers`, `/api/inventory`, `/api/analytics/*`, `/api/ai/*` (ask, investigate, reports). `/api/cart` now fronts the Redis-backed authenticated cart (§7), not a MySQL resource. Customer-facing order history/detail is implemented as `GET /api/customers/orders[/{order}]` (Phase 7, consumed by frontend in Phase 8E) — not the `/api/me/orders` path this list once speculated, corrected here to match what actually shipped.
 
 A separate `/api/platform/*` namespace (Platform Admin: organization review/approve/reject/suspend, platform-wide read views) is implied by the Platform Admin identity domain in §3 — not implemented in this design pass, noted here so a future session doesn't accidentally fold it into the merchant-facing `/api/organizations` routes, which remain tenant-scoped and unrelated to platform-level review.
 

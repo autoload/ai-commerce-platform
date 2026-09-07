@@ -179,6 +179,58 @@ function mockCheckoutSuccess(page: Page, clientSecret = 'pi_fake_secret_SUCCEED'
   return page.route('**/api/checkout', (route) => route.fulfill(checkoutSuccessResponse(clientSecret)))
 }
 
+// Phase 8E: on a confirmed-successful payment, CheckoutForm now navigates
+// to the customer Order Detail route instead of rendering an inline
+// message — that page independently fetches GET /api/customers/orders/{id}
+// (the already-shipped Phase 7 endpoint), so this mock is deliberately
+// separate from checkoutSuccessResponse()'s own (differently-shaped,
+// merchant-facing OrderResource) data, per the approved design.
+function mockCustomerOrderDetail(page: Page, orderId: number) {
+  return page.route(`**/api/customers/orders/${orderId}`, (route) =>
+    route.fulfill({
+      json: {
+        data: {
+          id: orderId,
+          order_number: 'ORD-1',
+          status: 'pending',
+          status_reason: null,
+          subtotal: '12.50',
+          discount_total: '0.00',
+          tax_total: '0.00',
+          total: '12.50',
+          currency: 'usd',
+          payment_status: 'processing',
+          paid_at: null,
+          cancelled_at: null,
+          created_at: '2026-09-06T12:00:00Z',
+          items: [
+            {
+              product_id: CART_ITEM.productId,
+              product_variant_id: CART_ITEM.variantId,
+              product_name: CART_ITEM.productName,
+              sku: CART_ITEM.sku,
+              unit_price: CART_ITEM.displayPrice,
+              quantity: CART_ITEM.quantity,
+              line_total: '12.50',
+              selected_options: null,
+            },
+          ],
+          shipping_address: {
+            recipient_name: 'Jane Doe',
+            line1: '123 Main St',
+            line2: null,
+            city: 'Springfield',
+            state: 'IL',
+            postal_code: '62701',
+            country: 'US',
+            phone: null,
+          },
+        },
+      },
+    }),
+  )
+}
+
 async function fillAddress(page: Page) {
   await page.getByLabel('Full name').fill('Jane Doe')
   await page.getByLabel('Address line 1').fill('123 Main St')
@@ -221,6 +273,7 @@ test('C. checkout renders the cart summary with an estimated total', async ({ pa
 test('D. checkout sends only variant ids and quantities, never display price or subtotal', async ({ page }) => {
   await installFakeStripe(page)
   await mockCart(page)
+  await mockCustomerOrderDetail(page, 55)
   await loginAsCustomer(page)
 
   let requestBody: unknown = null
@@ -232,7 +285,9 @@ test('D. checkout sends only variant ids and quantities, never display price or 
   await page.goto(`/store/${STORE_ID}/checkout`)
   await fillAddress(page)
   await page.getByRole('button', { name: /Pay/ }).click()
-  await expect(page.getByRole('status')).toBeVisible()
+  // Success navigates straight to Order Detail (Phase 8E) — no inline
+  // role="status" message renders on this page anymore.
+  await expect(page).toHaveURL(new RegExp(`/store/${STORE_ID}/orders/55$`))
 
   expect(requestBody).toEqual({
     items: [{ product_variant_id: CART_ITEM.variantId, quantity: CART_ITEM.quantity }],
@@ -247,19 +302,38 @@ test('D. checkout sends only variant ids and quantities, never display price or 
   })
 })
 
-test('E. a successful payment reaches the success state and clears the cart', async ({ page }) => {
+test('E. a successful payment navigates to order confirmation (Order Detail) and clears the cart', async ({ page }) => {
   await installFakeStripe(page)
   await mockCart(page)
+  // Deliberately separate mock from the checkout response itself — Order
+  // Detail must fetch its own authoritative data from
+  // GET /api/customers/orders/{order}, never trust the checkout response
+  // (a different, merchant-shaped OrderResource with no payment_status).
+  await mockCustomerOrderDetail(page, 55)
   await loginAsCustomer(page)
   await mockCheckoutSuccess(page)
+
+  let orderDetailRequested = false
+  await page.route('**/api/customers/orders/55', async (route) => {
+    orderDetailRequested = true
+    await route.fallback()
+  })
 
   await page.goto(`/store/${STORE_ID}/checkout`)
   await fillAddress(page)
   await page.getByRole('button', { name: /Pay/ }).click()
 
-  await expect(page.getByRole('status')).toBeVisible()
-  await expect(page.getByText('Payment successful')).toBeVisible()
-  await expect(page.getByText('ORD-1')).toBeVisible()
+  // checkout success -> navigation to customer order detail.
+  await expect(page).toHaveURL(new RegExp(`/store/${STORE_ID}/orders/55$`))
+  // -> order detail API request.
+  await expect.poll(() => orderDetailRequested).toBe(true)
+  // -> "order placed" confirmation banner, using router state only for
+  // display — the order data below all comes from the mocked API response.
+  await expect(page.getByRole('status')).toContainText('Your order has been placed')
+  // -> order detail itself renders, from the authoritative API response.
+  await expect(page.getByRole('heading', { name: 'ORD-1' })).toBeVisible()
+  await expect(page.getByText('Widget')).toBeVisible()
+  await expect(page.getByText('Jane Doe')).toBeVisible()
 
   await page.goto(`/store/${STORE_ID}/cart`)
   await expect(page.getByText('Your cart is empty.')).toBeVisible()
@@ -305,6 +379,7 @@ test('G. a Stripe payment failure is displayed and the cart is preserved', async
 test('H. the Pay button disables itself while a submission is in flight', async ({ page }) => {
   await installFakeStripe(page)
   await mockCart(page)
+  await mockCustomerOrderDetail(page, 55)
   await loginAsCustomer(page)
 
   await page.route('**/api/checkout', async (route) => {
@@ -322,7 +397,10 @@ test('H. the Pay button disables itself while a submission is in flight', async 
 
   await expect(payButton).toBeDisabled()
   await expect(payButton).toHaveText('Processing…')
-  await expect(page.getByRole('status')).toBeVisible({ timeout: 10000 })
+  // Success navigates to Order Detail (Phase 8E) rather than rendering
+  // inline — arriving there is what proves the in-flight submission
+  // eventually resolved.
+  await expect(page).toHaveURL(new RegExp(`/store/${STORE_ID}/orders/55$`), { timeout: 10000 })
 })
 
 test('I. a PaymentIntent status of "processing" shows a payment-pending state, not success, and does not clear the cart', async ({

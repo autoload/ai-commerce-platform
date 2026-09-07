@@ -1,6 +1,6 @@
 import { CardElement, useElements, useStripe } from '@stripe/react-stripe-js'
 import { useRef, useState, type FormEvent } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ApiError } from '../../services/apiClient'
 import type { CheckoutResponse } from '../../services/checkoutApi'
 import { useCart } from '../cart/CartContext'
@@ -41,6 +41,7 @@ type Status = 'idle' | 'submitting' | 'succeeded' | 'paymentPending' | 'orderErr
 export function CheckoutForm({ onSucceeded }: { onSucceeded: () => void }) {
   const params = useParams<{ storeId: string }>()
   const storeId = params.storeId
+  const navigate = useNavigate()
   const stripe = useStripe()
   const elements = useElements()
   const { items, subtotal, clearCart } = useCart()
@@ -199,19 +200,29 @@ export function CheckoutForm({ onSucceeded }: { onSucceeded: () => void }) {
       // left unresolved, etc.) is treated as not yet complete.
       const paymentIntent = confirmation.paymentIntent
       if (paymentIntent.status === 'succeeded') {
-        // Mark success BEFORE clearing the cart, not after. CheckoutPage
-        // renders an "empty cart" state whenever items.length === 0 &&
-        // !hasSucceeded — clearing first would transiently make that guard
-        // true (items already empty, hasSucceeded not yet set), unmounting
-        // this very component mid-async-function and losing its "succeeded"
-        // local state entirely, before onSucceeded() ever got a chance to
-        // set hasSucceeded. Flipping hasSucceeded first permanently clears
-        // that guard, so the later cart-clearing update can never unmount
-        // this component. clearCart() itself never throws (best-effort
-        // internally), so awaiting it here can't fail the success UI above.
+        // Mark success BEFORE clearing the cart, not after — see the
+        // (still-applicable) note this reordering exists for: clearing
+        // first would transiently make CheckoutPage's items-empty guard
+        // true before hasSucceeded is set, which previously risked
+        // unmounting this component mid-async-function. clearCart() itself
+        // never throws (best-effort internally).
         setStatus('succeeded')
         onSucceeded()
         await clearCart()
+        // Phase 8E: hand off to the durable, authoritative confirmation
+        // experience (OrderDetailPage, which fetches fresh from
+        // GET /api/customers/orders/{order}) instead of rendering a
+        // dead-end inline message here. `result.data.id` is server-derived
+        // (returned by the /api/checkout call that already succeeded to
+        // reach this point) and is used only to route to the right order —
+        // OrderDetailPage still verifies ownership itself against the
+        // authenticated API regardless of this id. `justPlaced` is display
+        // state only (a one-time banner), never a substitute for the real
+        // order data, which OrderDetailPage always fetches from the server.
+        navigate(`/store/${storeId}/orders/${result.data.id}`, {
+          replace: true,
+          state: { justPlaced: true },
+        })
         return
       }
 
@@ -228,23 +239,11 @@ export function CheckoutForm({ onSucceeded }: { onSucceeded: () => void }) {
     }
   }
 
-  if (status === 'succeeded') {
-    return (
-      <div role="status" className="space-y-4 rounded-lg border border-emerald-200 bg-emerald-50 p-6 dark:border-emerald-900 dark:bg-emerald-950">
-        <h2 className="text-lg font-semibold text-emerald-800 dark:text-emerald-300">Payment successful</h2>
-        <p className="text-sm text-emerald-700 dark:text-emerald-400">
-          Your order {checkoutResult?.data.order_number} has been placed. A confirmation will be available in your
-          order history shortly.
-        </p>
-        <Link
-          to={`/store/${storeId}/products`}
-          className="inline-block text-sm font-medium text-indigo-600 hover:text-indigo-500 dark:text-indigo-400"
-        >
-          Continue shopping
-        </Link>
-      </div>
-    )
-  }
+  // status === 'succeeded' has no render branch here — handleSubmit
+  // navigates straight to OrderDetailPage (Phase 8E) as soon as success is
+  // determined, so this component is never expected to still be mounted
+  // with that status. isTerminal (below) still guards against a stray
+  // resubmit in the narrow window before that navigation completes.
 
   // PaymentIntent status "processing" — Stripe has not yet definitively
   // resolved this payment (see the status check above). The cart is

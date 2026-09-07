@@ -18,6 +18,8 @@ import { ProductListPage as CatalogProductListPage } from './customer/catalog/Pr
 import { CheckoutPage } from './customer/checkout/CheckoutPage'
 import { HomePage as StorefrontHomePage } from './customer/layout/HomePage'
 import { StorefrontLayout } from './customer/layout/StorefrontLayout'
+import { OrderDetailPage as CustomerOrderDetailPage } from './customer/orders/OrderDetailPage'
+import { OrderHistoryPage as CustomerOrderHistoryPage } from './customer/orders/OrderHistoryPage'
 import { MerchantLandingPage } from './merchant/MerchantLandingPage'
 import { MerchantAuthProvider } from './merchant/auth/MerchantAuthContext'
 import { MerchantLoginPage } from './merchant/auth/MerchantLoginPage'
@@ -148,6 +150,25 @@ function App() {
               element={
                 <CustomerProtectedRoute>
                   <CustomerAccountPage />
+                </CustomerProtectedRoute>
+              }
+            />
+            {/* Phase 8E — reuses the already-shipped Phase 7 backend
+                (GET /api/customers/orders[/{order}]) verbatim; only the
+                frontend consumption is new here. */}
+            <Route
+              path="orders"
+              element={
+                <CustomerProtectedRoute>
+                  <CustomerOrderHistoryPage />
+                </CustomerProtectedRoute>
+              }
+            />
+            <Route
+              path="orders/:orderId"
+              element={
+                <CustomerProtectedRoute>
+                  <CustomerOrderDetailPage />
                 </CustomerProtectedRoute>
               }
             />

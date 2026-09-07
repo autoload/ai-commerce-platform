@@ -1,10 +1,14 @@
+import { Link, useParams } from 'react-router-dom'
 import { Card } from '../../components/Card'
 import { useCustomerAuth } from './CustomerAuthContext'
 
 // Minimal authenticated-only page — exists in Block 8C to give the customer
-// auth boundary a real protected route to guard. Order history (Block 8E)
-// and any richer account management are separate, later scope.
+// auth boundary a real protected route to guard. Any richer account
+// management beyond the Order History link (Block 8E) is separate, later
+// scope.
 export function AccountPage() {
+  const params = useParams<{ storeId: string }>()
+  const storeId = params.storeId
   const { customer, store } = useCustomerAuth()
 
   return (
@@ -27,6 +31,13 @@ export function AccountPage() {
           </div>
         </dl>
       </Card>
+
+      <Link
+        to={`/store/${storeId}/orders`}
+        className="text-sm font-medium text-indigo-600 hover:text-indigo-500 dark:text-indigo-400"
+      >
+        View your orders →
+      </Link>
     </div>
   )
 }
