@@ -18,6 +18,15 @@ import { test } from '@playwright/test'
 // prop validation (it duck-types the `stripe` prop) during development of
 // this file — trimming it back down would need to be re-verified the same
 // way, not assumed safe.
+//
+// Phase 8B revision: the customer in this suite is always authenticated
+// (checkout requires it), so its cart is now the Redis-backed /api/cart —
+// never localStorage. mockCart() below stands in for that endpoint with
+// simple in-memory state (GET returns it, DELETE clears it, matching
+// CheckoutForm's real clearCart()-on-confirmed-success call). It replaces
+// the previous approach of writing the guest localStorage cart directly,
+// which no longer has any effect on what an authenticated customer's
+// useCart() reads.
 
 const STORE_ID = 800
 
@@ -103,16 +112,38 @@ async function loginAsCustomer(page: Page) {
   await expect(page).toHaveURL(new RegExp(`/store/${STORE_ID}$`))
 }
 
-async function seedCart(page: Page, items: unknown[] = [CART_ITEM]) {
-  await page.evaluate(
-    ({ storeId, items }) => {
-      localStorage.setItem(
-        `ai_commerce.cart.${storeId}`,
-        JSON.stringify({ schemaVersion: 1, storeId, items }),
-      )
-    },
-    { storeId: STORE_ID, items },
-  )
+function toCartApiItem(item: typeof CART_ITEM) {
+  return {
+    product_id: item.productId,
+    product_variant_id: item.variantId,
+    product_name: item.productName,
+    sku: item.sku,
+    price: item.displayPrice,
+    compare_at_price: null,
+    in_stock: item.inStockAtAdd,
+    options: [],
+    quantity: item.quantity,
+    line_total: (Number(item.displayPrice) * item.quantity).toFixed(2),
+  }
+}
+
+// Stands in for the authenticated Redis-backed cart. Must be called BEFORE
+// loginAsCustomer(), not after — CartContext's GET /api/cart fires as soon
+// as login resolves to 'authenticated', so registering this route only
+// after login risks a race against the real (unmocked) request.
+async function mockCart(page: Page, items: (typeof CART_ITEM)[] = [CART_ITEM]) {
+  let state = items.map(toCartApiItem)
+
+  await page.route('**/api/cart', async (route) => {
+    if (route.request().method() === 'DELETE') {
+      state = []
+      await route.fulfill({ status: 204 })
+      return
+    }
+
+    const subtotal = state.reduce((sum, i) => sum + Number(i.line_total), 0).toFixed(2)
+    await route.fulfill({ json: { data: { items: state, subtotal, currency: 'usd' } } })
+  })
 }
 
 function checkoutSuccessResponse(clientSecret: string) {
@@ -165,8 +196,8 @@ test('A. the checkout page is protected — an unauthenticated visitor is redire
 
 test('B. navigating from the cart to checkout works', async ({ page }) => {
   await installFakeStripe(page)
+  await mockCart(page)
   await loginAsCustomer(page)
-  await seedCart(page)
 
   await page.goto(`/store/${STORE_ID}/cart`)
   await page.getByRole('link', { name: 'Checkout', exact: true }).click()
@@ -177,8 +208,8 @@ test('B. navigating from the cart to checkout works', async ({ page }) => {
 
 test('C. checkout renders the cart summary with an estimated total', async ({ page }) => {
   await installFakeStripe(page)
+  await mockCart(page)
   await loginAsCustomer(page)
-  await seedCart(page)
 
   await page.goto(`/store/${STORE_ID}/checkout`)
 
@@ -189,8 +220,8 @@ test('C. checkout renders the cart summary with an estimated total', async ({ pa
 
 test('D. checkout sends only variant ids and quantities, never display price or subtotal', async ({ page }) => {
   await installFakeStripe(page)
+  await mockCart(page)
   await loginAsCustomer(page)
-  await seedCart(page)
 
   let requestBody: unknown = null
   await page.route('**/api/checkout', async (route) => {
@@ -218,8 +249,8 @@ test('D. checkout sends only variant ids and quantities, never display price or 
 
 test('E. a successful payment reaches the success state and clears the cart', async ({ page }) => {
   await installFakeStripe(page)
+  await mockCart(page)
   await loginAsCustomer(page)
-  await seedCart(page)
   await mockCheckoutSuccess(page)
 
   await page.goto(`/store/${STORE_ID}/checkout`)
@@ -236,8 +267,8 @@ test('E. a successful payment reaches the success state and clears the cart', as
 
 test('F. a backend validation failure is displayed and the cart is preserved', async ({ page }) => {
   await installFakeStripe(page)
+  await mockCart(page)
   await loginAsCustomer(page)
-  await seedCart(page)
   await page.route('**/api/checkout', (route) =>
     route.fulfill({ status: 422, json: { message: 'Product variant 1 is unavailable for checkout: is not active.' } }),
   )
@@ -256,8 +287,8 @@ test('F. a backend validation failure is displayed and the cart is preserved', a
 
 test('G. a Stripe payment failure is displayed and the cart is preserved', async ({ page }) => {
   await installFakeStripe(page)
+  await mockCart(page)
   await loginAsCustomer(page)
-  await seedCart(page)
   await mockCheckoutSuccess(page, 'pi_fake_secret_DECLINE')
 
   await page.goto(`/store/${STORE_ID}/checkout`)
@@ -273,8 +304,8 @@ test('G. a Stripe payment failure is displayed and the cart is preserved', async
 
 test('H. the Pay button disables itself while a submission is in flight', async ({ page }) => {
   await installFakeStripe(page)
+  await mockCart(page)
   await loginAsCustomer(page)
-  await seedCart(page)
 
   await page.route('**/api/checkout', async (route) => {
     await new Promise((resolve) => setTimeout(resolve, 500))
@@ -298,8 +329,8 @@ test('I. a PaymentIntent status of "processing" shows a payment-pending state, n
   page,
 }) => {
   await installFakeStripe(page)
+  await mockCart(page)
   await loginAsCustomer(page)
-  await seedCart(page)
   await mockCheckoutSuccess(page, 'pi_fake_secret_PROCESSING')
 
   await page.goto(`/store/${STORE_ID}/checkout`)
@@ -319,8 +350,8 @@ test('J. changing the shipping address between two submit attempts uses a new id
   page,
 }) => {
   await installFakeStripe(page)
+  await mockCart(page)
   await loginAsCustomer(page)
-  await seedCart(page)
 
   const idempotencyKeys: (string | null)[] = []
   await page.route('**/api/checkout', (route) => {

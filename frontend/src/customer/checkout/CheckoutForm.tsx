@@ -199,9 +199,19 @@ export function CheckoutForm({ onSucceeded }: { onSucceeded: () => void }) {
       // left unresolved, etc.) is treated as not yet complete.
       const paymentIntent = confirmation.paymentIntent
       if (paymentIntent.status === 'succeeded') {
-        clearCart()
+        // Mark success BEFORE clearing the cart, not after. CheckoutPage
+        // renders an "empty cart" state whenever items.length === 0 &&
+        // !hasSucceeded — clearing first would transiently make that guard
+        // true (items already empty, hasSucceeded not yet set), unmounting
+        // this very component mid-async-function and losing its "succeeded"
+        // local state entirely, before onSucceeded() ever got a chance to
+        // set hasSucceeded. Flipping hasSucceeded first permanently clears
+        // that guard, so the later cart-clearing update can never unmount
+        // this component. clearCart() itself never throws (best-effort
+        // internally), so awaiting it here can't fail the success UI above.
         setStatus('succeeded')
         onSucceeded()
+        await clearCart()
         return
       }
 

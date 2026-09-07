@@ -179,6 +179,26 @@ return [
             'backoff_cap' => env('REDIS_BACKOFF_CAP', 1000),
         ],
 
+        // Phase 8B revision: the authenticated-customer cart role (see
+        // config/cart.php and App\Services\CartService), deliberately given
+        // its own connection/database index rather than reusing 'default'
+        // (the queue's role) or 'cache' — CLAUDE.md's Redis section already
+        // treats analytics-cache, queue, rate-limiting, and cart as four
+        // distinct roles sharing one engine, and this follows the same
+        // per-role-connection pattern 'cache' above already established.
+        'cart' => [
+            'url' => env('REDIS_URL'),
+            'host' => env('REDIS_HOST', '127.0.0.1'),
+            'username' => env('REDIS_USERNAME'),
+            'password' => env('REDIS_PASSWORD'),
+            'port' => env('REDIS_PORT', '6379'),
+            'database' => env('REDIS_CART_DB', '2'),
+            'max_retries' => env('REDIS_MAX_RETRIES', 3),
+            'backoff_algorithm' => env('REDIS_BACKOFF_ALGORITHM', 'decorrelated_jitter'),
+            'backoff_base' => env('REDIS_BACKOFF_BASE', 100),
+            'backoff_cap' => env('REDIS_BACKOFF_CAP', 1000),
+        ],
+
     ],
 
 ];

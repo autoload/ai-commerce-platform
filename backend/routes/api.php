@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Catalog\ProductController as CatalogProductController;
+use App\Http\Controllers\Customer\CartController;
 use App\Http\Controllers\Customer\CheckoutController;
 use App\Http\Controllers\Customer\CustomerAuthController;
 use App\Http\Controllers\Customer\OrderController as CustomerOrderController;
@@ -82,6 +83,22 @@ Route::prefix('customers')->name('customers.')->group(function () {
 Route::post('/checkout', [CheckoutController::class, 'store'])
     ->middleware(['auth:customer', 'tenant.customer'])
     ->name('checkout.store');
+
+// Phase 8B revision: authenticated cart, backed by Redis via CartService
+// (never MySQL, never touched directly by this controller). Top-level, not
+// nested under /customers — matching /checkout and
+// /orders/{order}/payment-retry's existing placement. {variant} is
+// constrained to digits since it's read directly from the route (not
+// resolved as an Eloquent model) — see CartController's own docblock for
+// why no store-ownership check is needed for it.
+Route::prefix('cart')->name('cart.')->middleware(['auth:customer', 'tenant.customer'])->group(function () {
+    Route::get('/', [CartController::class, 'show'])->name('show');
+    Route::post('/items', [CartController::class, 'addItem'])->name('items.store');
+    Route::patch('/items/{variant}', [CartController::class, 'updateItem'])->whereNumber('variant')->name('items.update');
+    Route::delete('/items/{variant}', [CartController::class, 'removeItem'])->whereNumber('variant')->name('items.destroy');
+    Route::delete('/', [CartController::class, 'clear'])->name('clear');
+    Route::post('/merge', [CartController::class, 'merge'])->name('merge');
+});
 
 // Phase 3 STEP 3D: payment retry. {order} is resolved and scoped to the
 // authenticated customer inside RetryPaymentController itself (not via

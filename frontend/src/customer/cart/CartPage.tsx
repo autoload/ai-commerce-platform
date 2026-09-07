@@ -5,7 +5,7 @@ import { useCart } from './CartContext'
 export function CartPage() {
   const params = useParams<{ storeId: string }>()
   const storeId = params.storeId
-  const { items, subtotal, incrementItem, decrementItem, setItemQuantity, removeItem } = useCart()
+  const { items, subtotal, isLoading, error, incrementItem, decrementItem, setItemQuantity, removeItem } = useCart()
 
   return (
     <div className="space-y-6">
@@ -17,7 +17,15 @@ export function CartPage() {
         </p>
       </div>
 
-      {items.length === 0 ? (
+      {error && (
+        <div role="alert" className="rounded-md border border-amber-200 bg-amber-50 p-4 text-sm text-amber-700 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-400">
+          {error}
+        </div>
+      )}
+
+      {isLoading ? (
+        <p className="text-sm text-slate-500 dark:text-slate-400">Loading your cart…</p>
+      ) : items.length === 0 ? (
         <div className="rounded-lg border border-dashed border-slate-300 p-6 text-center text-sm text-slate-500 dark:border-slate-700 dark:text-slate-400">
           Your cart is empty.{' '}
           <Link to={`/store/${storeId}/products`} className="font-medium text-indigo-600 hover:text-indigo-500 dark:text-indigo-400">

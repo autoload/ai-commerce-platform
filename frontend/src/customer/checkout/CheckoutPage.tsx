@@ -8,7 +8,7 @@ import { CheckoutForm } from './CheckoutForm'
 export function CheckoutPage() {
   const params = useParams<{ storeId: string }>()
   const storeId = params.storeId
-  const { items } = useCart()
+  const { items, isLoading } = useCart()
 
   // Once checkout succeeds, CheckoutForm clears the cart — which would
   // otherwise make `items.length === 0` immediately below fall through to
@@ -17,6 +17,17 @@ export function CheckoutPage() {
   // added" (show the empty state) from "empty because checkout just
   // succeeded" (keep rendering the form, which renders its success state).
   const [hasSucceeded, setHasSucceeded] = useState(false)
+
+  // Phase 8B revision: an authenticated cart is now fetched asynchronously
+  // (GET /api/cart) rather than read synchronously from localStorage. Wait
+  // for that fetch to resolve before deciding "empty" vs. rendering
+  // CheckoutForm with real items — otherwise a not-yet-loaded cart would
+  // flash the "your cart is empty" state on every checkout page visit.
+  // CheckoutForm itself still always sends only whatever `items` it reads
+  // from useCart() at submit time — never a stale/undefined snapshot.
+  if (isLoading && !hasSucceeded) {
+    return <p className="text-sm text-slate-500 dark:text-slate-400">Loading your cart…</p>
+  }
 
   if (items.length === 0 && !hasSucceeded) {
     return (

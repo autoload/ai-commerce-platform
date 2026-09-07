@@ -24,12 +24,20 @@ const SAMPLE_CUSTOMER = {
 
 const SAMPLE_STORE = { id: STORE_ID, name: 'Test Store' }
 
+const CART_URL = '**/api/cart'
+
 async function mockAuthenticatedSession(page: Page) {
   await page.route(LOGIN_URL, (route) =>
     route.fulfill({ json: { token: 'fake-customer-token', customer: SAMPLE_CUSTOMER } }),
   )
   await page.route(ME_URL, (route) => route.fulfill({ json: { customer: SAMPLE_CUSTOMER, store: SAMPLE_STORE } }))
   await page.route(LOGOUT_URL, (route) => route.fulfill({ json: { message: 'Logged out.' } }))
+  // Phase 8B revision: CartContext now fetches the authenticated cart as
+  // soon as login resolves. Mocked here (always empty — cart behavior
+  // itself is authenticated-cart.spec.ts's concern) purely so this file's
+  // login/logout assertions stay deterministic and backend-independent,
+  // matching its own header comment's stated approach.
+  await page.route(CART_URL, (route) => route.fulfill({ json: { data: { items: [], subtotal: '0.00', currency: 'usd' } } }))
 }
 
 async function login(page: Page) {
