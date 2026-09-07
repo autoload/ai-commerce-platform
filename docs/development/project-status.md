@@ -18,6 +18,55 @@ This is the single authoritative numbering for development phases in this docume
 | 7 | Customer-facing Order History | COMPLETE |
 | 8 | Frontend Storefront (Blocks 8-0/8A/8C/8B(revised)/8D/8E/8F) | COMPLETE |
 
+## Development Strategy — Commerce-Complete Before AI (established after Phase 8)
+
+**Phase 8 is complete.** The project is currently in the gap between the last completed phase (Phase 8 — Frontend Storefront) and whatever implementation phase comes next — no next phase has been designed, reviewed, or approved yet.
+
+**Clarified strategic priority** (not a new architectural decision — this restates and makes explicit the pre-existing principle already recorded in `PRD.md` §34, "Project Principle": *"Build a real business workflow first, then use AI to make the workflow smarter"*): the immediate objective is to make the Commerce platform a **complete, usable, runnable product** — AI is not the immediate next implementation step. Analytics is treated as part of completing the commerce product, not part of the AI milestone, and is expected to land before AI work begins. AI Assistant / AI Tools / AI Insights / Investigation / Reports remain intentionally later work.
+
+**Intended high-level milestone sequence** (names only — no Phase numbers are assigned to the unstarted milestones; see below):
+
+```
+Foundation
+   ↓
+Commerce Core
+   ↓
+Customer Storefront
+   ↓
+Commerce Completeness
+   ↓
+Analytics
+   ↓
+Production Readiness
+   ↓
+AI Commerce
+```
+
+The already-completed Phases 0–8 (canonical roadmap table above) correspond to the first three milestones: **Foundation** (Phases 0–3 — architecture, database design, infrastructure, models/enums), **Commerce Core** (Phases 4–7 — back-office CRUD, checkout/payment/inventory, payment expiry sweep, customer order history), and **Customer Storefront** (Phase 8 — the full customer-facing storefront, Blocks 8-0 through 8F). **Commerce Completeness, Analytics, Production Readiness, and AI Commerce are not yet started, not yet numbered, and not yet scoped** — each requires its own Discovery → Design → Review → Approval → Implementation → Verification cycle before any code is written, per this project's established incremental approach. This document does not assign a Phase number to any of them and does not select which one is implemented next.
+
+**Scope distinction, for clarity when planning future work:**
+
+- **A. Already implemented** — Platform Admin auth, merchant auth/org/RBAC, Store/Product/Inventory/Order management, Checkout/Payment/Inventory (Stripe, idempotent webhooks, payment retry, expiry sweep), customer auth/cart/checkout/order-history, and the full storefront UI with its Playwright coverage. See "Completed" below and the canonical roadmap table above.
+- **B. Remaining work to complete the Commerce MVP** (candidates only — appearing here approves nothing; each item's existing classification elsewhere in this document, e.g. under "Not Started" or "Known Issues," is unchanged): merchant-facing customer management (`PRD.md` §10 — no route/UI exists); Platform Admin organization approve/reject/suspend lifecycle (structurally designed, never built); refund initiation flow (schema-only today); `charge.refunded` webhook handling (recorded, not acted on); Analytics (`PRD.md` §11 — no code exists); production readiness / CI/CD (no pipeline exists); Notifications; Jobs/queue business logic (`app/Jobs` exists but is empty); discount/tax logic if the final MVP scope requires it (`orders.discount_total`/`tax_total` are currently unused columns); password reset and other optional completeness items.
+- **C. Future product capabilities** — already explicitly deferred, unchanged: everything under `PRD.md` §33 "Future Roadmap" (POS/Shopify integration, additional payment providers, multi-channel commerce, marketing automation, AI recommendations, real-time analytics, event-driven architecture) and the MVP exclusions already recorded in `architecture-review.md` (inventory soft-holds, pre-aggregated analytics, multi-org membership, read replicas).
+- **D. AI / advanced intelligence work** — intentionally later work, architecture unchanged: AI Assistant, AI Tools (`getSales`/`getOrders`/`getProducts`/`getCustomers`/`getRefunds`/`getInventory`/`comparePeriods`), AI Insights, Investigation, and Reports, all as already specified in `CLAUDE.md`'s "AI Agent" section and `PRD.md` §12–18. Intended sequencing relative to the rest of the platform:
+
+```
+Commerce data and business services
+        ↓
+   Analytics
+        ↓
+Production-ready Commerce platform
+        ↓
+AI Tools / AI Assistant
+        ↓
+AI Insights / Reports / Advanced AI
+```
+
+The future AI layer is required to consume the same safe, tenant-scoped business services/tools the rest of the application already uses — per `CLAUDE.md`'s existing, unchanged "AI Agent — Tool-Calling, Not Direct DB Access" rules (the LLM must never have direct database access). This document does not redesign that architecture; it only records where AI work sits in the overall sequence.
+
+**No next-phase scope is approved.** Whatever is implemented next — whether that turns out to be part of Commerce Completeness, Analytics, or something else — requires its own Discovery → Design → Review → Approval → Implementation → Verification pass before any code is written, per this project's established incremental-by-functional-area approach. This section records strategic sequencing only, not a Phase 9 decision.
+
 ## Current Phase
 
 **Phase 3 — Foundation Application Layer (Models + Enums). Complete and verified.** Phase 2F (Inventory) through Phase 2A (Platform & Tenant Identity), Phase 1 (Docker Infrastructure Bootstrap), and Phase 0 (Architecture & Database Design) are all complete and approved — the full Phase 2A–2F migration plan (24 tables) is migrated and verified. Phase 3's first slice added Eloquent Models for all 24 tables and 9 PHP enums for every documented finite state/value set, with relationships, casts, soft-deletes, and timestamps configured to match the live schema exactly. Full detail: "Phase 3 (Foundation Application Layer)" section below (see "Phase 2A/2B/2C/2D/2E/2F (Database Migrations)" for the prior batches). **Phase 4 (Back Office Feature Blocks), Phase 5 (Checkout / Payment / Inventory), Phase 6 (Payment Expiry Sweep), and Phase 7 (Customer-facing Order History) are all also complete — see the canonical roadmap table above for the full Phase 0–8 status. Phase 8 (Frontend Storefront) is complete: Blocks 8-0, 8A, 8C, 8B (as revised), 8D, 8E, and 8F are all complete and verified — see the "Phase 8" entries under "Completed" below.**
@@ -251,11 +300,11 @@ Committed 2026-09-06 as `ca77060` (`feat: add customer order history and detail`
 
 ## Current Task
 
-None in progress. Phase 8 Block 8E (Order History, Order Detail, checkout confirmation integration) was committed as `ca77060` (`feat: add customer order history and detail`). Phase 8 Block 8F — Integration Pass (cross-block customer-journey E2E coverage plus the `CartContext` login/merge race-condition fix found during it) was committed as `6341be7` (`feat: complete storefront integration pass`). **Phase 0 through Phase 7 remain complete as previously recorded. Phase 8 — Frontend Storefront (Blocks 8-0, 8A, 8C, 8B as revised — committed `b1bbcba` — 8D, 8E, and 8F) is complete.**
+None in progress. Phase 8 Block 8E (Order History, Order Detail, checkout confirmation integration) was committed as `ca77060` (`feat: add customer order history and detail`). Phase 8 Block 8F — Integration Pass (cross-block customer-journey E2E coverage plus the `CartContext` login/merge race-condition fix found during it) was committed as `6341be7` (`feat: complete storefront integration pass`). **Phase 0 through Phase 7 remain complete as previously recorded. Phase 8 — Frontend Storefront (Blocks 8-0, 8A, 8C, 8B as revised — committed `b1bbcba` — 8D, 8E, and 8F) is complete.** The project is now between completed Phase 8 and whatever implementation phase comes next — see "Development Strategy — Commerce-Complete Before AI" above for the clarified strategic direction (commerce completeness and Analytics before the AI milestone). No next-phase scope has been selected or approved.
 
 ## Next Step
 
-**Phase 8 (Frontend Storefront) is now complete in full** — all blocks (8-0, 8A, 8C, 8B as revised, 8D, 8E, 8F) implemented, verified, and committed (see the Phase 8 entries under "Completed" above). **No next phase has been designed, reviewed, or approved yet** — per this project's incremental-by-functional-area approach (Design → Review → Implement → Verify → Sign-off → Next phase), whatever comes next requires its own design/review decision before implementation begins; this document does not presume Analytics, the AI Agent, or Jobs/notifications as that choice. Still open or deferred, unaffected by Phase 8's completion: Job/queue infrastructure for post-payment analytics/notifications (`database-design.md` §4 — no Job class exists anywhere in this codebase yet); `charge.refunded`/refund handling (§5, the `refunded` order-status *value* is already displayable if it ever occurs, but no flow reaches it); G3's late-payment/inventory-oversell policy (still open); and `reports` (AI-generated artifacts), the only table left unmigrated from the full schema. Do not begin any further implementation without explicit approval.
+**No next-phase scope is approved.** See "Development Strategy — Commerce-Complete Before AI" above: the immediate strategic objective is to make the Commerce platform complete, usable, and runnable — AI Assistant/Tools/Insights work is intentionally deferred until after Commerce Completeness, Analytics, and Production Readiness. Whatever is implemented next — whether that turns out to be part of Commerce Completeness, Analytics, or something else — must go through Discovery → Design → Review → Approval → Implementation → Verification before any code is written, per this project's established incremental-by-functional-area approach; this document does not presume Analytics, Commerce Completeness work, the AI Agent, or Jobs/notifications as the selected next phase. Still open or deferred, unaffected by this strategic clarification: Job/queue infrastructure for post-payment analytics/notifications (`database-design.md` §4 — no Job class exists anywhere in this codebase yet); `charge.refunded`/refund handling (§5, the `refunded` order-status *value* is already displayable if it ever occurs, but no flow reaches it); G3's late-payment/inventory-oversell policy (still open); and `reports` (AI-generated artifacts), the only table left unmigrated from the full schema. Do not begin any further implementation without explicit approval.
 
 ## Phase 2A (Database Migrations)
 
