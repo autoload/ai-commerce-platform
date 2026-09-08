@@ -27,6 +27,9 @@ import { MerchantAuthProvider } from './merchant/auth/MerchantAuthContext'
 import { MerchantLoginPage } from './merchant/auth/MerchantLoginPage'
 import { MerchantProtectedRoute } from './merchant/auth/MerchantProtectedRoute'
 import { MerchantRegisterPage } from './merchant/auth/MerchantRegisterPage'
+import { CategoryCreatePage } from './merchant/categories/CategoryCreatePage'
+import { CategoryDetailPage } from './merchant/categories/CategoryDetailPage'
+import { CategoryListPage } from './merchant/categories/CategoryListPage'
 import { MerchantLayout } from './merchant/layout/MerchantLayout'
 import { OrderDetailPage } from './merchant/orders/OrderDetailPage'
 import { OrderListPage } from './merchant/orders/OrderListPage'
@@ -109,6 +112,10 @@ function App() {
               <Route path=":storeId/products" element={<ProductListPage />} />
               <Route path=":storeId/products/new" element={<ProductCreatePage />} />
               <Route path=":storeId/products/:productId" element={<ProductDetailPage />} />
+
+              <Route path=":storeId/categories" element={<CategoryListPage />} />
+              <Route path=":storeId/categories/new" element={<CategoryCreatePage />} />
+              <Route path=":storeId/categories/:categoryId" element={<CategoryDetailPage />} />
 
               <Route path=":storeId/orders" element={<OrderListPage />} />
               <Route path=":storeId/orders/:orderId" element={<OrderDetailPage />} />

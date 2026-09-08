@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ApiError } from '../../services/apiClient'
 import { useMerchantAuth } from '../auth/MerchantAuthContext'
+import { useCategoriesList } from '../categories/useCategories'
 import { InventorySection } from './InventorySection'
 import { useDeleteProduct, useProduct, useUpdateProduct } from './useProducts'
 
@@ -21,6 +22,7 @@ export function ProductDetailPage() {
   const { data, isLoading, isError, error } = useProduct(storeId, productId)
   const updateProduct = useUpdateProduct(storeId, productId)
   const deleteProduct = useDeleteProduct(storeId)
+  const { data: categoriesData } = useCategoriesList(storeId)
 
   const [isEditing, setIsEditing] = useState(false)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
@@ -66,6 +68,7 @@ export function ProductDetailPage() {
     const sku = String(formData.get('sku') ?? '').trim()
     const priceRaw = String(formData.get('price') ?? '').trim()
     const description = String(formData.get('description') ?? '').trim()
+    const categoryIdRaw = String(formData.get('category_id') ?? '').trim()
 
     if (!name || !sku || !priceRaw) {
       return
@@ -74,9 +77,10 @@ export function ProductDetailPage() {
     if (Number.isNaN(price) || price < 0) {
       return
     }
+    const categoryId = categoryIdRaw === '' ? null : Number(categoryIdRaw)
 
     try {
-      await updateProduct.mutateAsync({ name, sku, price, description })
+      await updateProduct.mutateAsync({ name, sku, price, description, category_id: categoryId })
       setIsEditing(false)
     } catch {
       // Server-side failure message is already surfaced via updateProduct.error below.
@@ -131,6 +135,12 @@ export function ProductDetailPage() {
                     <dt className="text-slate-500 dark:text-slate-400">Price</dt>
                     <dd className="text-slate-900 dark:text-slate-100">${product.variant.price}</dd>
                   </div>
+                  <div className="flex gap-2">
+                    <dt className="text-slate-500 dark:text-slate-400">Category</dt>
+                    <dd className="text-slate-900 dark:text-slate-100">
+                      {categoriesData?.data.find((category) => category.id === product.category_id)?.name ?? '—'}
+                    </dd>
+                  </div>
                 </dl>
               )}
             </div>
@@ -163,6 +173,24 @@ export function ProductDetailPage() {
                 defaultValue={product.description ?? ''}
                 className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
               />
+            </div>
+            <div>
+              <label htmlFor="category_id" className="block text-sm font-medium text-slate-700 dark:text-slate-300">
+                Category
+              </label>
+              <select
+                id="category_id"
+                name="category_id"
+                defaultValue={product.category_id ?? ''}
+                className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+              >
+                <option value="">No category</option>
+                {categoriesData?.data.map((category) => (
+                  <option key={category.id} value={category.id}>
+                    {category.name}
+                  </option>
+                ))}
+              </select>
             </div>
             <div>
               <label htmlFor="sku" className="block text-sm font-medium text-slate-700 dark:text-slate-300">

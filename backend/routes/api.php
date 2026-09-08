@@ -6,6 +6,7 @@ use App\Http\Controllers\Customer\CheckoutController;
 use App\Http\Controllers\Customer\CustomerAuthController;
 use App\Http\Controllers\Customer\OrderController as CustomerOrderController;
 use App\Http\Controllers\Customer\RetryPaymentController;
+use App\Http\Controllers\Merchant\CategoryController;
 use App\Http\Controllers\Merchant\InventoryController;
 use App\Http\Controllers\Merchant\MerchantAuthController;
 use App\Http\Controllers\Merchant\OrderController;
@@ -47,6 +48,14 @@ Route::middleware(['auth:merchant', 'tenant.merchant'])->group(function () {
         Route::get('/stores/{store}/products/{product}', [ProductController::class, 'show'])->name('products.show');
         Route::patch('/stores/{store}/products/{product}', [ProductController::class, 'update'])->name('products.update');
         Route::delete('/stores/{store}/products/{product}', [ProductController::class, 'destroy'])->name('products.destroy');
+
+        // Phase 9B: merchant category management. Directly store-scoped,
+        // same as Product — no new middleware.
+        Route::get('/stores/{store}/categories', [CategoryController::class, 'index'])->name('categories.index');
+        Route::post('/stores/{store}/categories', [CategoryController::class, 'store'])->name('categories.store');
+        Route::get('/stores/{store}/categories/{category}', [CategoryController::class, 'show'])->name('categories.show');
+        Route::patch('/stores/{store}/categories/{category}', [CategoryController::class, 'update'])->name('categories.update');
+        Route::delete('/stores/{store}/categories/{category}', [CategoryController::class, 'destroy'])->name('categories.destroy');
 
         Route::get('/stores/{store}/variants/{variant}/inventory', [InventoryController::class, 'show'])->name('inventory.show');
         Route::post('/stores/{store}/variants/{variant}/inventory/adjust', [InventoryController::class, 'adjust'])->name('inventory.adjust');

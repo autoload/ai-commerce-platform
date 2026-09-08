@@ -2,22 +2,18 @@ import { useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ApiError } from '../../services/apiClient'
 import { useMerchantAuth } from '../auth/MerchantAuthContext'
-import { useCategoriesList } from '../categories/useCategories'
-import { useCreateProduct } from './useProducts'
+import { useCreateCategory } from './useCategories'
 
-export function ProductCreatePage() {
+export function CategoryCreatePage() {
   const params = useParams<{ storeId: string }>()
   const storeId = Number(params.storeId)
   const { role, organization } = useMerchantAuth()
   const navigate = useNavigate()
-  const createProduct = useCreateProduct(storeId)
-  const { data: categoriesData } = useCategoriesList(storeId)
+  const createCategory = useCreateCategory(storeId)
 
   const [name, setName] = useState('')
-  const [sku, setSku] = useState('')
-  const [price, setPrice] = useState('')
   const [description, setDescription] = useState('')
-  const [categoryId, setCategoryId] = useState('')
+  const [sortOrder, setSortOrder] = useState('')
   const [validationError, setValidationError] = useState<string | null>(null)
 
   const canCreate = role === 'owner' || role === 'store_admin'
@@ -26,13 +22,13 @@ export function ProductCreatePage() {
     return (
       <div className="space-y-4">
         <p className="text-sm text-slate-600 dark:text-slate-300">
-          You do not have permission to create products in this store.
+          You do not have permission to create categories in this store.
         </p>
         <Link
-          to={`/merchant/stores/${storeId}/products`}
+          to={`/merchant/stores/${storeId}/categories`}
           className="text-sm font-medium text-indigo-600 hover:text-indigo-500 dark:text-indigo-400"
         >
-          ← Back to products
+          ← Back to categories
         </Link>
       </div>
     )
@@ -42,14 +38,14 @@ export function ProductCreatePage() {
     return (
       <div className="space-y-4">
         <p className="text-sm text-slate-600 dark:text-slate-300">
-          Your organization must be approved before you can create products. Current status:{' '}
+          Your organization must be approved before you can create categories. Current status:{' '}
           <span className="font-medium">{organization.status}</span>.
         </p>
         <Link
-          to={`/merchant/stores/${storeId}/products`}
+          to={`/merchant/stores/${storeId}/categories`}
           className="text-sm font-medium text-indigo-600 hover:text-indigo-500 dark:text-indigo-400"
         >
-          ← Back to products
+          ← Back to categories
         </Link>
       </div>
     )
@@ -59,44 +55,45 @@ export function ProductCreatePage() {
     event.preventDefault()
     setValidationError(null)
 
-    if (!name || !sku || !price) {
-      setValidationError('Name, SKU, and price are required.')
+    if (!name) {
+      setValidationError('Name is required.')
       return
     }
-    const priceValue = Number(price)
-    if (Number.isNaN(priceValue) || priceValue < 0) {
-      setValidationError('Price must be a non-negative number.')
-      return
+    let sortOrderValue: number | undefined
+    if (sortOrder !== '') {
+      sortOrderValue = Number(sortOrder)
+      if (!Number.isInteger(sortOrderValue)) {
+        setValidationError('Sort order must be a whole number.')
+        return
+      }
     }
 
     try {
-      const { data: product } = await createProduct.mutateAsync({
+      const { data: category } = await createCategory.mutateAsync({
         name,
-        sku,
-        price: priceValue,
         description: description || undefined,
-        category_id: categoryId ? Number(categoryId) : undefined,
+        sort_order: sortOrderValue,
       })
-      navigate(`/merchant/stores/${storeId}/products/${product.id}`, { replace: true })
+      navigate(`/merchant/stores/${storeId}/categories/${category.id}`, { replace: true })
     } catch {
       // Server-side failure message is already surfaced via mutationError below.
     }
   }
 
-  const mutationError = createProduct.error instanceof ApiError ? createProduct.error.message : null
+  const mutationError = createCategory.error instanceof ApiError ? createCategory.error.message : null
   const errorMessage = validationError ?? mutationError
 
   return (
     <div className="space-y-6">
       <Link
-        to={`/merchant/stores/${storeId}/products`}
+        to={`/merchant/stores/${storeId}/categories`}
         className="text-sm text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100"
       >
-        ← Back to products
+        ← Back to categories
       </Link>
 
       <div>
-        <h1 className="text-xl font-semibold text-slate-900 dark:text-slate-50">Create product</h1>
+        <h1 className="text-xl font-semibold text-slate-900 dark:text-slate-50">Create category</h1>
         <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
           A URL-friendly slug will be generated from the name automatically.
         </p>
@@ -105,7 +102,7 @@ export function ProductCreatePage() {
       <form className="max-w-sm space-y-4" onSubmit={handleSubmit} noValidate>
         <div>
           <label htmlFor="name" className="block text-sm font-medium text-slate-700 dark:text-slate-300">
-            Product name
+            Category name
           </label>
           <input
             id="name"
@@ -132,51 +129,17 @@ export function ProductCreatePage() {
         </div>
 
         <div>
-          <label htmlFor="category_id" className="block text-sm font-medium text-slate-700 dark:text-slate-300">
-            Category
-          </label>
-          <select
-            id="category_id"
-            name="category_id"
-            value={categoryId}
-            onChange={(event) => setCategoryId(event.target.value)}
-            className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-          >
-            <option value="">No category</option>
-            {categoriesData?.data.map((category) => (
-              <option key={category.id} value={category.id}>
-                {category.name}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <div>
-          <label htmlFor="sku" className="block text-sm font-medium text-slate-700 dark:text-slate-300">
-            SKU
+          <label htmlFor="sort_order" className="block text-sm font-medium text-slate-700 dark:text-slate-300">
+            Sort order
           </label>
           <input
-            id="sku"
-            name="sku"
-            type="text"
-            value={sku}
-            onChange={(event) => setSku(event.target.value)}
-            className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-          />
-        </div>
-
-        <div>
-          <label htmlFor="price" className="block text-sm font-medium text-slate-700 dark:text-slate-300">
-            Price
-          </label>
-          <input
-            id="price"
-            name="price"
+            id="sort_order"
+            name="sort_order"
             type="number"
-            step="0.01"
-            min="0"
-            value={price}
-            onChange={(event) => setPrice(event.target.value)}
+            step="1"
+            value={sortOrder}
+            onChange={(event) => setSortOrder(event.target.value)}
+            placeholder="0"
             className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
           />
         </div>
@@ -190,13 +153,13 @@ export function ProductCreatePage() {
         <div className="flex items-center gap-3">
           <button
             type="submit"
-            disabled={createProduct.isPending}
+            disabled={createCategory.isPending}
             className="rounded-md bg-indigo-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            {createProduct.isPending ? 'Creating…' : 'Create product'}
+            {createCategory.isPending ? 'Creating…' : 'Create category'}
           </button>
           <Link
-            to={`/merchant/stores/${storeId}/products`}
+            to={`/merchant/stores/${storeId}/categories`}
             className="text-sm text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100"
           >
             Cancel
