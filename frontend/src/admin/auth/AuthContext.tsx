@@ -15,6 +15,7 @@ type AuthStatus = 'loading' | 'authenticated' | 'unauthenticated'
 type AuthContextValue = {
   status: AuthStatus
   admin: PlatformAdmin | null
+  token: string | null
   login: (email: string, password: string) => Promise<void>
   isLoggingIn: boolean
   loginError: string | null
@@ -70,6 +71,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const value: AuthContextValue = {
     status,
     admin: meQuery.data?.platform_admin ?? null,
+    token,
     login: async (email, password) => {
       await loginMutation.mutateAsync({ email, password })
     },

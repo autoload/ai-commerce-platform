@@ -5,6 +5,8 @@ import { ProtectedRoute } from './admin/auth/ProtectedRoute'
 import { DashboardPage } from './admin/dashboard/DashboardPage'
 import { AdminLayout } from './admin/layout/AdminLayout'
 import { ADMIN_NAV_ITEMS } from './admin/layout/navigation'
+import { OrganizationDetailPage } from './admin/organizations/OrganizationDetailPage'
+import { OrganizationListPage } from './admin/organizations/OrganizationListPage'
 import { ComingSoonPage } from './admin/pages/ComingSoonPage'
 import { AccountPage as CustomerAccountPage } from './customer/auth/AccountPage'
 import { CustomerAuthProvider } from './customer/auth/CustomerAuthContext'
@@ -35,9 +37,12 @@ import { StoreCreatePage } from './merchant/stores/StoreCreatePage'
 import { StoreDetailPage } from './merchant/stores/StoreDetailPage'
 import { StoreListPage } from './merchant/stores/StoreListPage'
 
-// Every nav item besides Dashboard is a placeholder until its feature
-// block is implemented — see docs/development/project-status.md.
-const COMING_SOON_ITEMS = ADMIN_NAV_ITEMS.filter((item) => item.path !== '/admin/dashboard')
+// Every nav item besides Dashboard and Organizations (Phase 9A) is a
+// placeholder until its feature block is implemented — see
+// docs/development/project-status.md.
+const COMING_SOON_ITEMS = ADMIN_NAV_ITEMS.filter(
+  (item) => item.path !== '/admin/dashboard' && item.path !== '/admin/organizations',
+)
 
 function App() {
   return (
@@ -57,6 +62,8 @@ function App() {
           >
             <Route index element={<Navigate to="dashboard" replace />} />
             <Route path="dashboard" element={<DashboardPage />} />
+            <Route path="organizations" element={<OrganizationListPage />} />
+            <Route path="organizations/:organizationId" element={<OrganizationDetailPage />} />
             {COMING_SOON_ITEMS.map((item) => (
               <Route
                 key={item.path}

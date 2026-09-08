@@ -11,6 +11,7 @@ use App\Http\Controllers\Merchant\MerchantAuthController;
 use App\Http\Controllers\Merchant\OrderController;
 use App\Http\Controllers\Merchant\ProductController;
 use App\Http\Controllers\Merchant\StoreController;
+use App\Http\Controllers\Platform\OrganizationController;
 use App\Http\Controllers\Platform\PlatformAuthController;
 use App\Http\Controllers\Webhooks\StripeWebhookController;
 use Illuminate\Http\Request;
@@ -62,6 +63,17 @@ Route::prefix('platform')->name('platform.')->group(function () {
     Route::middleware('auth:platform_admin')->group(function () {
         Route::post('/auth/logout', [PlatformAuthController::class, 'logout'])->name('auth.logout');
         Route::get('/auth/me', [PlatformAuthController::class, 'me'])->name('auth.me');
+
+        // Phase 9A: organization lifecycle. No tenant-context middleware
+        // here — Platform Admin sits above the Organization/Store
+        // hierarchy and has unrestricted read/action visibility across all
+        // organizations (see OrganizationController's own docblock).
+        Route::get('/organizations', [OrganizationController::class, 'index'])->name('organizations.index');
+        Route::get('/organizations/{organization}', [OrganizationController::class, 'show'])->name('organizations.show');
+        Route::post('/organizations/{organization}/approve', [OrganizationController::class, 'approve'])->name('organizations.approve');
+        Route::post('/organizations/{organization}/reject', [OrganizationController::class, 'reject'])->name('organizations.reject');
+        Route::post('/organizations/{organization}/suspend', [OrganizationController::class, 'suspend'])->name('organizations.suspend');
+        Route::post('/organizations/{organization}/reactivate', [OrganizationController::class, 'reactivate'])->name('organizations.reactivate');
     });
 });
 
