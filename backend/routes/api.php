@@ -12,6 +12,7 @@ use App\Http\Controllers\Merchant\InventoryController;
 use App\Http\Controllers\Merchant\MerchantAuthController;
 use App\Http\Controllers\Merchant\OrderController;
 use App\Http\Controllers\Merchant\ProductController;
+use App\Http\Controllers\Merchant\RefundController;
 use App\Http\Controllers\Merchant\StoreController;
 use App\Http\Controllers\Platform\OrganizationController;
 use App\Http\Controllers\Platform\PlatformAuthController;
@@ -64,6 +65,10 @@ Route::middleware(['auth:merchant', 'tenant.merchant'])->group(function () {
         Route::get('/stores/{store}/orders', [OrderController::class, 'index'])->name('orders.index');
         Route::get('/stores/{store}/orders/{order}', [OrderController::class, 'show'])->name('orders.show');
         Route::patch('/stores/{store}/orders/{order}/status', [OrderController::class, 'updateStatus'])->name('orders.updateStatus');
+
+        // Phase 9D: merchant-initiated full refunds. Directly store-scoped,
+        // same as the status-update action above — no new middleware.
+        Route::post('/stores/{store}/orders/{order}/refund', [RefundController::class, 'store'])->name('orders.refund');
 
         // Phase 9C: merchant customer management, read-only. Directly
         // store-scoped, same as Product/Category/Order — no new middleware.

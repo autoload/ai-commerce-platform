@@ -6,6 +6,7 @@ import {
   type MerchantOrderStatus,
   type OrderListParams,
 } from '../../services/ordersApi'
+import { createRefund, type RefundCreatePayload } from '../../services/refundsApi'
 import { useMerchantAuth } from '../auth/MerchantAuthContext'
 
 const ordersKey = (storeId: number) => ['stores', storeId, 'orders'] as const
@@ -37,6 +38,18 @@ export function useUpdateOrderStatus(storeId: number, orderId: number) {
 
   return useMutation({
     mutationFn: (status: MerchantOrderStatus) => updateOrderStatus(token as string, storeId, orderId, status),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ordersKey(storeId) })
+    },
+  })
+}
+
+export function useCreateRefund(storeId: number, orderId: number) {
+  const { token } = useMerchantAuth()
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: (payload: RefundCreatePayload) => createRefund(token as string, storeId, orderId, payload),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ordersKey(storeId) })
     },

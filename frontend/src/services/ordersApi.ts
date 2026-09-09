@@ -27,6 +27,18 @@ export type OrderShippingAddress = {
   phone: string | null
 }
 
+export type RefundStatus = 'pending' | 'succeeded' | 'failed'
+
+export type Refund = {
+  id: number
+  order_id: number
+  payment_id: number
+  amount: string
+  reason: string | null
+  status: RefundStatus
+  created_at: string | null
+}
+
 export type Order = {
   id: number
   store_id: number
@@ -48,7 +60,12 @@ export type Order = {
   // relation) — see OrderResource's whenLoaded() convention.
   items?: OrderItem[]
   shipping_address?: OrderShippingAddress | null
+  // Phase 9D — same whenLoaded() convention as items/shipping_address.
+  refunds?: Refund[]
 }
+
+/** The order statuses a refund action may be attempted from. */
+export const REFUNDABLE_ORDER_STATUSES: OrderStatus[] = ['paid', 'processing', 'shipped', 'completed']
 
 type OrderListMeta = {
   current_page: number

@@ -59,7 +59,7 @@ class OrderController extends Controller
 
         Gate::authorize('view', $order);
 
-        $order->load(['items', 'addresses']);
+        $order->load(['items', 'addresses', 'refunds']);
 
         return new OrderResource($order);
     }

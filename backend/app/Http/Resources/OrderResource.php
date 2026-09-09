@@ -9,10 +9,11 @@ use Illuminate\Http\Resources\Json\JsonResource;
 /**
  * Standard JSON representation of an Order, following
  * StoreResource/ProductResource/InventoryResource's convention. A single
- * resource class for both list and detail (approved decision N4): `items`
- * and `shipping_address` are populated via whenLoaded() — index() doesn't
- * eager-load them (list stays light), show() does. No payment/refund data
- * (approved decision N8) — that's a different block's scope.
+ * resource class for both list and detail (approved decision N4): `items`,
+ * `shipping_address`, and `refunds` (Phase 9D) are populated via
+ * whenLoaded() — index() doesn't eager-load any of them (list stays
+ * light), show() does. Still no payment-status data (approved decision
+ * N8, unaffected by Phase 9D) — that remains a different block's scope.
  *
  * @mixin Order
  */
@@ -64,6 +65,7 @@ class OrderResource extends JsonResource
                     'phone' => $address->phone,
                 ] : null;
             }),
+            'refunds' => $this->whenLoaded('refunds', fn () => RefundResource::collection($this->refunds)),
         ];
     }
 }

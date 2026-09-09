@@ -1,8 +1,15 @@
+import { useRef, useState, type FormEvent } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { ApiError } from '../../services/apiClient'
-import type { MerchantOrderStatus, OrderStatus } from '../../services/ordersApi'
+import { REFUNDABLE_ORDER_STATUSES, type MerchantOrderStatus, type OrderStatus, type RefundStatus } from '../../services/ordersApi'
 import { useMerchantAuth } from '../auth/MerchantAuthContext'
-import { useOrder, useUpdateOrderStatus } from './useOrders'
+import { useCreateRefund, useOrder, useUpdateOrderStatus } from './useOrders'
+
+const REFUND_STATUS_LABELS: Record<RefundStatus, string> = {
+  pending: 'Pending',
+  succeeded: 'Succeeded',
+  failed: 'Failed',
+}
 
 const STATUS_LABELS: Record<OrderStatus, string> = {
   pending: 'Pending',
@@ -35,6 +42,10 @@ export function OrderDetailPage() {
 
   const { data, isLoading, isError, error } = useOrder(storeId, orderId)
   const updateStatus = useUpdateOrderStatus(storeId, orderId)
+  const createRefund = useCreateRefund(storeId, orderId)
+
+  const [isConfirmingRefund, setIsConfirmingRefund] = useState(false)
+  const idempotencyKeyRef = useRef<string>(crypto.randomUUID())
 
   const canManage = role === 'owner' || role === 'store_admin'
 
@@ -71,12 +82,32 @@ export function OrderDetailPage() {
   const order = data.data
   const nextAction = NEXT_ACTIONS[order.status]
   const updateErrorMessage = updateStatus.error instanceof ApiError ? updateStatus.error.message : null
+  const refundErrorMessage = createRefund.error instanceof ApiError ? createRefund.error.message : null
+  const canRefund = canManage && REFUNDABLE_ORDER_STATUSES.includes(order.status)
 
   async function handleTransition(target: MerchantOrderStatus) {
     try {
       await updateStatus.mutateAsync(target)
     } catch {
       // Surfaced via updateStatus.error below.
+    }
+  }
+
+  async function handleRefundSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const formData = new FormData(event.currentTarget)
+    const reason = String(formData.get('reason') ?? '').trim()
+
+    try {
+      await createRefund.mutateAsync({
+        idempotency_key: idempotencyKeyRef.current,
+        reason: reason || undefined,
+      })
+      setIsConfirmingRefund(false)
+      idempotencyKeyRef.current = crypto.randomUUID()
+    } catch {
+      // Surfaced via refundErrorMessage below — the same idempotency key
+      // is kept so a retry of this same attempt is safely idempotent.
     }
   }
 
@@ -115,16 +146,28 @@ export function OrderDetailPage() {
           </div>
         </dl>
 
-        {canManage && nextAction && (
+        {canManage && (nextAction || canRefund) && (
           <div className="mt-6 flex items-center gap-3 border-t border-slate-200 pt-4 dark:border-slate-800">
-            <button
-              type="button"
-              onClick={() => handleTransition(nextAction.status)}
-              disabled={updateStatus.isPending}
-              className="rounded-md bg-indigo-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {updateStatus.isPending ? 'Saving…' : nextAction.label}
-            </button>
+            {nextAction && (
+              <button
+                type="button"
+                onClick={() => handleTransition(nextAction.status)}
+                disabled={updateStatus.isPending}
+                className="rounded-md bg-indigo-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {updateStatus.isPending ? 'Saving…' : nextAction.label}
+              </button>
+            )}
+
+            {canRefund && !isConfirmingRefund && (
+              <button
+                type="button"
+                onClick={() => setIsConfirmingRefund(true)}
+                className="rounded-md border border-red-300 px-3 py-2 text-sm font-medium text-red-600 transition hover:bg-red-50 dark:border-red-900 dark:text-red-400 dark:hover:bg-red-950"
+              >
+                Refund order
+              </button>
+            )}
           </div>
         )}
 
@@ -133,7 +176,74 @@ export function OrderDetailPage() {
             {updateErrorMessage}
           </p>
         )}
+
+        {canRefund && isConfirmingRefund && (
+          <form
+            onSubmit={handleRefundSubmit}
+            className="mt-4 space-y-3 border-t border-slate-200 pt-4 dark:border-slate-800"
+          >
+            <p className="text-sm text-slate-700 dark:text-slate-300">
+              This will fully refund <strong>${order.total}</strong> to the customer via Stripe. Partial refunds are
+              not supported.
+            </p>
+            <div>
+              <label htmlFor="reason" className="block text-sm font-medium text-slate-700 dark:text-slate-300">
+                Reason (optional)
+              </label>
+              <input
+                id="reason"
+                name="reason"
+                type="text"
+                maxLength={255}
+                className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+              />
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                type="submit"
+                disabled={createRefund.isPending}
+                className="rounded-md bg-red-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-red-500 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {createRefund.isPending ? 'Refunding…' : 'Confirm full refund'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsConfirmingRefund(false)}
+                disabled={createRefund.isPending}
+                className="text-sm text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100"
+              >
+                Cancel
+              </button>
+            </div>
+            {refundErrorMessage && (
+              <p role="alert" className="text-sm text-red-600 dark:text-red-400">
+                {refundErrorMessage}
+              </p>
+            )}
+          </form>
+        )}
       </div>
+
+      {order.refunds && order.refunds.length > 0 && (
+        <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+          <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-50">Refund history</h2>
+          <ul className="mt-3 divide-y divide-slate-200 dark:divide-slate-800">
+            {order.refunds.map((refund) => (
+              <li key={refund.id} className="flex items-center justify-between py-2 text-sm">
+                <div>
+                  <p className="text-slate-900 dark:text-slate-100">${refund.amount}</p>
+                  {refund.reason && (
+                    <p className="text-xs text-slate-500 dark:text-slate-400">{refund.reason}</p>
+                  )}
+                </div>
+                <span className="text-xs text-slate-500 dark:text-slate-400">
+                  {REFUND_STATUS_LABELS[refund.status] ?? refund.status}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {order.items && order.items.length > 0 && (
         <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">

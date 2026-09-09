@@ -5,7 +5,9 @@ namespace App\Providers;
 use App\Models\ProductVariant;
 use App\Policies\InventoryPolicy;
 use App\Services\StripeApiPaymentIntentGateway;
+use App\Services\StripeApiRefundGateway;
 use App\Services\StripePaymentIntentGateway;
+use App\Services\StripeRefundGateway;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\ServiceProvider;
 use Stripe\StripeClient;
@@ -20,6 +22,7 @@ class AppServiceProvider extends ServiceProvider
         $this->app->singleton(StripeClient::class, fn () => new StripeClient(config('services.stripe.secret')));
 
         $this->app->bind(StripePaymentIntentGateway::class, StripeApiPaymentIntentGateway::class);
+        $this->app->bind(StripeRefundGateway::class, StripeApiRefundGateway::class);
     }
 
     /**
