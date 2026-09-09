@@ -30,6 +30,8 @@ import { MerchantRegisterPage } from './merchant/auth/MerchantRegisterPage'
 import { CategoryCreatePage } from './merchant/categories/CategoryCreatePage'
 import { CategoryDetailPage } from './merchant/categories/CategoryDetailPage'
 import { CategoryListPage } from './merchant/categories/CategoryListPage'
+import { CustomerDetailPage } from './merchant/customers/CustomerDetailPage'
+import { CustomerListPage } from './merchant/customers/CustomerListPage'
 import { MerchantLayout } from './merchant/layout/MerchantLayout'
 import { OrderDetailPage } from './merchant/orders/OrderDetailPage'
 import { OrderListPage } from './merchant/orders/OrderListPage'
@@ -119,6 +121,9 @@ function App() {
 
               <Route path=":storeId/orders" element={<OrderListPage />} />
               <Route path=":storeId/orders/:orderId" element={<OrderDetailPage />} />
+
+              <Route path=":storeId/customers" element={<CustomerListPage />} />
+              <Route path=":storeId/customers/:customerId" element={<CustomerDetailPage />} />
             </Route>
           </Route>
 

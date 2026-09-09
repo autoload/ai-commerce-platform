@@ -7,6 +7,7 @@ use App\Http\Controllers\Customer\CustomerAuthController;
 use App\Http\Controllers\Customer\OrderController as CustomerOrderController;
 use App\Http\Controllers\Customer\RetryPaymentController;
 use App\Http\Controllers\Merchant\CategoryController;
+use App\Http\Controllers\Merchant\CustomerController;
 use App\Http\Controllers\Merchant\InventoryController;
 use App\Http\Controllers\Merchant\MerchantAuthController;
 use App\Http\Controllers\Merchant\OrderController;
@@ -63,6 +64,11 @@ Route::middleware(['auth:merchant', 'tenant.merchant'])->group(function () {
         Route::get('/stores/{store}/orders', [OrderController::class, 'index'])->name('orders.index');
         Route::get('/stores/{store}/orders/{order}', [OrderController::class, 'show'])->name('orders.show');
         Route::patch('/stores/{store}/orders/{order}/status', [OrderController::class, 'updateStatus'])->name('orders.updateStatus');
+
+        // Phase 9C: merchant customer management, read-only. Directly
+        // store-scoped, same as Product/Category/Order — no new middleware.
+        Route::get('/stores/{store}/customers', [CustomerController::class, 'index'])->name('customers.index');
+        Route::get('/stores/{store}/customers/{customer}', [CustomerController::class, 'show'])->name('customers.show');
     });
 });
 

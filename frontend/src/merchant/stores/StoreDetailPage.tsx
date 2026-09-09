@@ -93,7 +93,7 @@ export function StoreDetailPage() {
         ← Back to stores
       </Link>
 
-      <div className="grid gap-3 sm:grid-cols-3">
+      <div className="grid gap-3 sm:grid-cols-4">
         <Link
           to={`/merchant/stores/${store.id}/products`}
           className="block rounded-lg border border-slate-200 bg-white p-4 text-sm font-medium text-slate-900 shadow-sm transition hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
@@ -111,6 +111,12 @@ export function StoreDetailPage() {
           className="block rounded-lg border border-slate-200 bg-white p-4 text-sm font-medium text-slate-900 shadow-sm transition hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
         >
           Orders →
+        </Link>
+        <Link
+          to={`/merchant/stores/${store.id}/customers`}
+          className="block rounded-lg border border-slate-200 bg-white p-4 text-sm font-medium text-slate-900 shadow-sm transition hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
+        >
+          Customers →
         </Link>
       </div>
 
