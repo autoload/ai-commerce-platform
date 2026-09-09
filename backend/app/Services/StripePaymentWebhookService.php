@@ -83,6 +83,18 @@ class StripePaymentWebhookService
         OrderStatus::Completed,
     ];
 
+    /**
+     * Phase 9E-1 (G3-A) — database-design.md §14's "logged for manual
+     * reconciliation" promise, implemented. Set on Order.status_reason
+     * when a payment_intent.succeeded webhook lands for an Order that has
+     * already left Pending (merchant-cancelled, or the expiry-sweep race
+     * §14 documents as an accepted, bounded residual risk). Payment is
+     * still recorded as Succeeded — Stripe is always the source of truth
+     * for Payment status — but the Order is never reopened and inventory
+     * is never touched: G3-A is detection/alerting only.
+     */
+    private const PAYMENT_SUCCEEDED_AFTER_CLOSURE_REASON = 'payment_succeeded_after_closure';
+
     public function __construct(
         private readonly InventoryAdjustmentService $inventoryAdjustmentService,
     ) {}
@@ -373,12 +385,53 @@ class StripePaymentWebhookService
             ->first();
 
         if ($order->status !== OrderStatus::Pending) {
+            $this->recordPaymentSucceededAfterClosure($order, $payment);
+
             return;
         }
 
         $order->status = OrderStatus::Paid;
         $order->paid_at = now();
         $order->save();
+    }
+
+    /**
+     * Phase 9E-1 (G3-A). Fires only when a genuinely new Payment
+     * transition into Succeeded lands on an Order that has already left
+     * Pending — never on a routine pending->paid success. Detection/
+     * alerting only: Order.status is never changed here and no inventory
+     * mutation is attempted, per the approved G3-A design.
+     *
+     * Idempotency is structural, not a new mechanism: this method is only
+     * ever reached once per Payment, because handleSucceeded()'s own
+     * terminal-status guard (TERMINAL_STATUSES) short-circuits before
+     * calling transitionOrderToPaid() again on any later delivery for a
+     * Payment already Succeeded — exact-event-id redelivery is separately
+     * blocked further upstream by stripe_webhook_events' unique
+     * stripe_event_id. The status_reason equality check below is a third,
+     * redundant guard purely for defense-in-depth, matching this class's
+     * existing style of stacking cheap extra checks even where a stronger
+     * guarantee already exists elsewhere.
+     */
+    private function recordPaymentSucceededAfterClosure(Order $order, Payment $payment): void
+    {
+        if ($order->status_reason === self::PAYMENT_SUCCEEDED_AFTER_CLOSURE_REASON) {
+            return;
+        }
+
+        $previousStatusReason = $order->status_reason;
+
+        $order->status_reason = self::PAYMENT_SUCCEEDED_AFTER_CLOSURE_REASON;
+        $order->save();
+
+        Log::critical('Payment succeeded for an Order that had already left Pending — payment and order are now inconsistent and require manual reconciliation.', [
+            'order_id' => $order->id,
+            'payment_id' => $payment->id,
+            'store_id' => $order->store_id,
+            'organization_id' => $order->organization_id,
+            'order_status' => $order->status->value,
+            'previous_status_reason' => $previousStatusReason,
+        ]);
     }
 
     /**

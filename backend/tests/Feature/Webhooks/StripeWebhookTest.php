@@ -17,6 +17,7 @@ use App\Services\CheckoutOrderCreationService;
 use App\Services\InventoryAdjustmentService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Illuminate\Testing\TestResponse;
 use RuntimeException;
@@ -544,6 +545,170 @@ class StripeWebhookTest extends TestCase
 
         $this->assertSame('succeeded', $fixture['payment']->status->value);
         $this->assertSame('cancelled', $order->status->value);
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 9E-1 (G3-A) — Detect & Alert
+    // -----------------------------------------------------------------
+
+    public function test_g3a_alerts_when_payment_succeeds_after_merchant_cancellation(): void
+    {
+        Log::spy();
+
+        $fixture = $this->checkoutFixture();
+        $order = $fixture['order'];
+        $order->status = OrderStatus::Cancelled;
+        $order->status_reason = 'merchant_cancelled';
+        $order->save();
+
+        $response = $this->postWebhook($this->buildEventPayload('evt_g3a_1', 'payment_intent.succeeded', $fixture['stripePaymentIntentId']));
+        $response->assertStatus(200);
+
+        $fixture['payment']->refresh();
+        $order->refresh();
+
+        $this->assertSame('succeeded', $fixture['payment']->status->value);
+        $this->assertSame('cancelled', $order->status->value);
+        $this->assertSame('payment_succeeded_after_closure', $order->status_reason);
+
+        Log::shouldHaveReceived('critical')
+            ->once()
+            ->withArgs(function (string $message, array $context) use ($order, $fixture) {
+                return $context['order_id'] === $order->id
+                    && $context['payment_id'] === $fixture['payment']->id
+                    && $context['store_id'] === $order->store_id
+                    && $context['organization_id'] === $order->organization_id
+                    && $context['order_status'] === 'cancelled'
+                    && $context['previous_status_reason'] === 'merchant_cancelled';
+            });
+    }
+
+    /**
+     * The expiry-sweep-style case: the order was cancelled with
+     * status_reason = 'expired' (PaymentExpirySweepService's own value,
+     * not reproduced via the sweep itself here -- set directly, matching
+     * this file's established "isolate the transition under test" style)
+     * rather than a merchant action. G3-A must not distinguish the two
+     * causes -- see database-design.md §14's residual-race acceptance.
+     */
+    public function test_g3a_alerts_when_payment_succeeds_after_expiry_sweep_style_cancellation(): void
+    {
+        Log::spy();
+
+        $fixture = $this->checkoutFixture();
+        $order = $fixture['order'];
+        $order->status = OrderStatus::Cancelled;
+        $order->status_reason = 'expired';
+        $order->cancelled_at = now();
+        $order->save();
+
+        $response = $this->postWebhook($this->buildEventPayload('evt_g3a_2', 'payment_intent.succeeded', $fixture['stripePaymentIntentId']));
+        $response->assertStatus(200);
+
+        $fixture['payment']->refresh();
+        $order->refresh();
+
+        $this->assertSame('succeeded', $fixture['payment']->status->value);
+        $this->assertSame('cancelled', $order->status->value);
+        $this->assertSame('payment_succeeded_after_closure', $order->status_reason);
+
+        Log::shouldHaveReceived('critical')->once();
+    }
+
+    public function test_g3a_exact_event_redelivery_does_not_duplicate_alert(): void
+    {
+        Log::spy();
+
+        $fixture = $this->checkoutFixture();
+        $order = $fixture['order'];
+        $order->status = OrderStatus::Cancelled;
+        $order->status_reason = 'merchant_cancelled';
+        $order->save();
+
+        $payload = $this->buildEventPayload('evt_g3a_dup_1', 'payment_intent.succeeded', $fixture['stripePaymentIntentId']);
+
+        $this->postWebhook($payload)->assertStatus(200);
+        $this->postWebhook($payload)->assertStatus(200);
+
+        $order->refresh();
+        $this->assertSame('payment_succeeded_after_closure', $order->status_reason);
+
+        // The second delivery is the identical Stripe event id -- caught
+        // by stripe_webhook_events' unique constraint before
+        // applyPaymentIntentEvent() (and therefore G3-A) ever runs again.
+        $this->assertDatabaseCount('stripe_webhook_events', 1);
+        Log::shouldHaveReceived('critical')->once();
+    }
+
+    /**
+     * A different Stripe event id for a Payment that is already Succeeded
+     * -- the redelivery case G3-A actually depends on being blocked:
+     * handleSucceeded()'s pre-existing terminal-status guard on Payment
+     * short-circuits before transitionOrderToPaid() (and G3-A's alert
+     * logic inside it) is ever reached a second time, independent of
+     * event id.
+     */
+    public function test_g3a_different_event_id_for_already_succeeded_payment_does_not_duplicate_alert(): void
+    {
+        Log::spy();
+
+        $fixture = $this->checkoutFixture();
+        $order = $fixture['order'];
+        $order->status = OrderStatus::Cancelled;
+        $order->status_reason = 'merchant_cancelled';
+        $order->save();
+
+        $this->postWebhook($this->buildEventPayload('evt_g3a_evt_a', 'payment_intent.succeeded', $fixture['stripePaymentIntentId']))
+            ->assertStatus(200);
+
+        $response = $this->postWebhook($this->buildEventPayload('evt_g3a_evt_b', 'payment_intent.succeeded', $fixture['stripePaymentIntentId']));
+        $response->assertStatus(200);
+
+        $fixture['payment']->refresh();
+        $order->refresh();
+
+        $this->assertSame('succeeded', $fixture['payment']->status->value);
+        $this->assertSame('payment_succeeded_after_closure', $order->status_reason);
+        $this->assertDatabaseCount('stripe_webhook_events', 2);
+        Log::shouldHaveReceived('critical')->once();
+    }
+
+    public function test_g3a_does_not_affect_normal_pending_to_paid_flow(): void
+    {
+        Log::spy();
+
+        $fixture = $this->checkoutFixture();
+
+        $response = $this->postWebhook($this->buildEventPayload('evt_g3a_normal_1', 'payment_intent.succeeded', $fixture['stripePaymentIntentId']));
+        $response->assertStatus(200);
+
+        $fixture['payment']->refresh();
+        $fixture['order']->refresh();
+
+        $this->assertSame('succeeded', $fixture['payment']->status->value);
+        $this->assertSame('paid', $fixture['order']->status->value);
+        $this->assertNull($fixture['order']->status_reason);
+
+        Log::shouldNotHaveReceived('critical');
+    }
+
+    public function test_g3a_creates_no_inventory_transaction(): void
+    {
+        $fixture = $this->checkoutFixture(stock: 10, quantity: 2, price: 10.00);
+        $order = $fixture['order'];
+        $order->status = OrderStatus::Cancelled;
+        $order->status_reason = 'merchant_cancelled';
+        $order->save();
+
+        $countBefore = InventoryTransaction::count();
+
+        $this->postWebhook($this->buildEventPayload('evt_g3a_inv_1', 'payment_intent.succeeded', $fixture['stripePaymentIntentId']))
+            ->assertStatus(200);
+
+        $this->assertSame($countBefore, InventoryTransaction::count());
+        // Inventory stays exactly at the already-claimed level -- G3-A
+        // must never reclaim or restore it.
+        $this->assertDatabaseHas('inventory', ['product_variant_id' => $fixture['variant']->id, 'quantity_on_hand' => 8]);
     }
 
     // -----------------------------------------------------------------
