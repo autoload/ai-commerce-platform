@@ -45,6 +45,15 @@ class RefundService
         OrderStatus::Completed,
     ];
 
+    /**
+     * Phase 9E-2 (G3-B) — the exact G3-A alarm value (StripePaymentWebhookService's
+     * PAYMENT_SUCCEEDED_AFTER_CLOSURE_REASON). Duplicated here as a literal,
+     * not a cross-class constant reference, since the two classes have no
+     * other coupling and this project has no shared-constants convention —
+     * the literal is exercised end-to-end by tests on both sides.
+     */
+    private const G3B_CLOSURE_ALARM_REASON = 'payment_succeeded_after_closure';
+
     public function __construct(
         private readonly StripeRefundGateway $refundGateway,
     ) {}
@@ -61,7 +70,7 @@ class RefundService
             /** @var Order $locked */
             $locked = Order::where('id', $order->id)->lockForUpdate()->first();
 
-            if (! in_array($locked->status, self::REFUNDABLE_ORDER_STATUSES, true)) {
+            if (! $this->isRefundableOrderState($locked)) {
                 throw new RefundNotEligibleException($locked, 'order status is not refundable');
             }
 
@@ -139,5 +148,24 @@ class RefundService
     private function isDuplicateEntryViolation(QueryException $e): bool
     {
         return ($e->errorInfo[1] ?? null) === 1062;
+    }
+
+    /**
+     * Phase 9E-2 (G3-B) — exactly two paths, never widened into a general
+     * "Cancelled orders are refundable" rule: the normal Phase 9D
+     * REFUNDABLE_ORDER_STATUSES set, unchanged, OR the single narrow G3-A
+     * compensation case (an order left Cancelled by the merchant/expiry
+     * sweep, whose Payment nonetheless later succeeded — flagged by
+     * StripePaymentWebhookService's G3-A alarm). An ordinary Cancelled
+     * order (any other status_reason, or none) is deliberately NOT
+     * eligible here — the caller's separate "a Succeeded Payment exists"
+     * check still applies unconditionally after this, regardless of which
+     * branch matched.
+     */
+    private function isRefundableOrderState(Order $order): bool
+    {
+        return in_array($order->status, self::REFUNDABLE_ORDER_STATUSES, true)
+            || ($order->status === OrderStatus::Cancelled
+                && $order->status_reason === self::G3B_CLOSURE_ALARM_REASON);
     }
 }

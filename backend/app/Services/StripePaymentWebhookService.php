@@ -95,6 +95,32 @@ class StripePaymentWebhookService
      */
     private const PAYMENT_SUCCEEDED_AFTER_CLOSURE_REASON = 'payment_succeeded_after_closure';
 
+    /**
+     * Phase 9E-2 (G3-B) — the "resolved" counterpart to the G3-A alarm
+     * above. Written only when a G3-B compensation refund (initiated
+     * through RefundService's own narrow, explicitly-named eligibility
+     * carve-out — never automatically) actually reaches Succeeded; see
+     * transitionOrderToRefunded()'s G3-B branch.
+     */
+    private const PAYMENT_REFUNDED_AFTER_CLOSURE_REASON = 'payment_refunded_after_closure';
+
+    /**
+     * Phase 9E-3 — a narrower, separate alarm from G3-A's own
+     * PAYMENT_SUCCEEDED_AFTER_CLOSURE_REASON above. `'expired'` is
+     * PaymentExpirySweepService's own hardcoded failure_reason literal —
+     * the one signal, already populated, that distinguishes "this Payment
+     * was canceled by our expiry sweep" from any genuinely Stripe-reported
+     * cancellation. This branch deliberately does NOT transition
+     * Payment.status back to Succeeded (preserving the terminal-status
+     * invariant every other Payment/Refund transition in this class
+     * already relies on) — it is detection/alerting only, requiring
+     * manual reconciliation, same posture as G3-A. Never reuse
+     * PAYMENT_SUCCEEDED_AFTER_CLOSURE_REASON for this case: that value's
+     * established meaning implies a locally Succeeded Payment (and is
+     * what makes an order G3-B-eligible), which is never true here.
+     */
+    private const PAYMENT_SUCCEEDED_AFTER_EXPIRY_CANCELLATION_REASON = 'payment_succeeded_after_expiry_cancellation';
+
     public function __construct(
         private readonly InventoryAdjustmentService $inventoryAdjustmentService,
     ) {}
@@ -279,6 +305,16 @@ class StripePaymentWebhookService
      * four documented source statuses — never a regression, and never
      * forced if the order has since moved to some other defensive state
      * (logged, not silently overwritten).
+     *
+     * Phase 9E-2 (G3-B) carve-out: a Cancelled order whose status_reason
+     * is exactly the G3-A alarm value is the one deliberate exception —
+     * its successful compensation refund must NOT reopen the order (it
+     * stays Cancelled, matching G3-A's own "never reopen" invariant) but
+     * DOES need status_reason resolved to a distinct "handled" value, so
+     * this no longer reads as a still-open alarm. Every other non-
+     * refundable-status order (an ordinary Cancelled order, or any other
+     * terminal state) falls through to the pre-existing, unmodified
+     * warning-and-no-op path below.
      */
     private function transitionOrderToRefunded(Refund $refund): void
     {
@@ -288,6 +324,22 @@ class StripePaymentWebhookService
             ->first();
 
         if (! in_array($order->status, self::REFUNDABLE_ORDER_STATUSES, true)) {
+            if ($order->status === OrderStatus::Cancelled
+                && $order->status_reason === self::PAYMENT_SUCCEEDED_AFTER_CLOSURE_REASON) {
+                $order->status_reason = self::PAYMENT_REFUNDED_AFTER_CLOSURE_REASON;
+                $order->save();
+
+                Log::info('G3-B compensation refund succeeded — order remains cancelled, status_reason resolved.', [
+                    'order_id' => $order->id,
+                    'refund_id' => $refund->id,
+                    'payment_id' => $refund->payment_id,
+                    'store_id' => $order->store_id,
+                    'organization_id' => $order->organization_id,
+                ]);
+
+                return;
+            }
+
             Log::warning('Refund succeeded but order was not in a refundable status — order left unchanged.', [
                 'order_id' => $order->id,
                 'refund_id' => $refund->id,
@@ -304,15 +356,31 @@ class StripePaymentWebhookService
     /**
      * Driven by this payment's own checkout ledger rows, mirroring
      * releaseInventoryForPayment()'s exact shape (reason swapped to
-     * Refund) — a payment eligible for refund has, by definition,
-     * succeeded, so it can never have a prior `release` row (release only
-     * ever fires on payment failure/cancellation). Idempotency is fully
-     * covered by inventory_transactions' existing dedup_key mechanism —
-     * a second attempt to insert the same (order_item_id, refund,
-     * payment_id) combination fails the existing unique constraint,
-     * a defense-in-depth backstop behind this method's own terminal-
-     * status guard (applyRefundEvent() never calls this twice for the
-     * same Refund).
+     * Refund). For the normal Phase 9D case, a payment eligible for
+     * refund has, by definition, succeeded, so it can never have a prior
+     * `release` row (release only ever fires on payment failure/
+     * cancellation, neither of which is compatible with that same Payment
+     * later reaching Succeeded). Idempotency is fully covered by
+     * inventory_transactions' existing dedup_key mechanism — a second
+     * attempt to insert the same (order_item_id, refund, payment_id)
+     * combination fails the existing unique constraint, a defense-in-
+     * depth backstop behind this method's own terminal-status guard
+     * (applyRefundEvent() never calls this twice for the same Refund).
+     *
+     * Phase 9E-2 (G3-B) is the one real exception to "can never have a
+     * prior release row": a G3-B compensation refund's Payment did
+     * succeed, but only *after* its Order was already cancelled — meaning
+     * cancellation/expiry already inserted a `release` row for every
+     * claim before this refund could ever be initiated. Re-crediting
+     * those claims here on top of that release would double-credit
+     * inventory that was never actually withheld a second time. Each
+     * claim is checked independently (per order_item_id, not once per
+     * payment) against inventory_transactions' own dedup_key invariant —
+     * at most one `release` row can ever exist for a given (order_item_id,
+     * payment_id) pair, so this check is unambiguous. For the normal
+     * case this is always false (per the paragraph above), so this is a
+     * pure safety addition with zero behavior change to any existing,
+     * already-tested refund.
      */
     private function restoreInventoryForRefund(Payment $payment, Refund $refund): void
     {
@@ -321,6 +389,22 @@ class StripePaymentWebhookService
             ->get();
 
         foreach ($claims as $claim) {
+            $alreadyReleased = InventoryTransaction::where('order_item_id', $claim->order_item_id)
+                ->where('payment_id', $payment->id)
+                ->where('reason', InventoryTransactionReason::Release)
+                ->exists();
+
+            if ($alreadyReleased) {
+                Log::info('Refund inventory restoration skipped — this claim was already released (G3-B: order was cancelled before its late payment succeeded).', [
+                    'order_item_id' => $claim->order_item_id,
+                    'payment_id' => $payment->id,
+                    'checkout_transaction_id' => $claim->id,
+                    'refund_id' => $refund->id,
+                ]);
+
+                continue;
+            }
+
             $this->inventoryAdjustmentService->adjust(
                 $claim->variant,
                 abs($claim->delta),
@@ -345,6 +429,17 @@ class StripePaymentWebhookService
 
     private function handleSucceeded(Payment $payment): void
     {
+        // Phase 9E-3 — must be checked BEFORE the blanket terminal-status
+        // guard immediately below, since Canceled is itself one of
+        // TERMINAL_STATUSES: this narrow carve-out (expiry-sweep-canceled
+        // Payment, genuinely later succeeded on Stripe's side) would
+        // otherwise be silently absorbed by that guard and never reached.
+        if ($this->isExpirySweepCanceledPayment($payment)) {
+            $this->recordLatePaymentSucceededAfterExpirySweep($payment);
+
+            return;
+        }
+
         if (in_array($payment->status, self::TERMINAL_STATUSES, true)) {
             return;
         }
@@ -431,6 +526,82 @@ class StripePaymentWebhookService
             'organization_id' => $order->organization_id,
             'order_status' => $order->status->value,
             'previous_status_reason' => $previousStatusReason,
+        ]);
+    }
+
+    /**
+     * Phase 9E-3. `'expired'` is PaymentExpirySweepService's own
+     * hardcoded failure_reason literal — the only place in this codebase
+     * that ever writes it — so this pairing (Canceled + failure_reason
+     * 'expired') unambiguously identifies "canceled by our expiry sweep,"
+     * as opposed to any genuinely Stripe-reported cancellation/failure
+     * (which would carry Stripe's own cancellation_reason/error message
+     * here instead). Deliberately narrow: does not fire for a Canceled
+     * Payment with any other failure_reason.
+     */
+    private function isExpirySweepCanceledPayment(Payment $payment): bool
+    {
+        return $payment->status === PaymentStatus::Canceled
+            && $payment->failure_reason === 'expired';
+    }
+
+    /**
+     * Phase 9E-3 — G3-A extension covering the expiry-sweep race
+     * database-design.md §14 names explicitly (PaymentExpirySweepService
+     * marks Payment Canceled in the same transaction it releases
+     * inventory and cancels the Order, so a genuinely later
+     * payment_intent.succeeded would otherwise be silently absorbed by
+     * handleSucceeded()'s blanket terminal-status guard before G3-A's own
+     * alarm logic could ever run).
+     *
+     * This branch intentionally PRESERVES the terminal Payment-status
+     * invariant this class relies on everywhere else: Payment.status
+     * stays Canceled, never reverts to Succeeded. It is detection/
+     * alerting only, exactly like G3-A — no inventory mutation, no
+     * Stripe call, no Order reopening, no Refund. A human must reconcile
+     * this manually (in Stripe's own dashboard); this increment does not
+     * attempt to correct the local Payment record itself.
+     *
+     * Uses a distinct status_reason from G3-A's own
+     * PAYMENT_SUCCEEDED_AFTER_CLOSURE_REASON specifically because that
+     * value's established meaning implies a locally Succeeded Payment
+     * (and is what RefundService's G3-B eligibility carve-out keys on) —
+     * never true here, so reusing it would make the same string mean two
+     * different underlying Payment states.
+     *
+     * Idempotency: unlike G3-A, this branch never transitions
+     * Payment.status, so it does not inherit a second guard "for free"
+     * from a Payment terminal-status change — the status_reason equality
+     * check below is the sole mechanism preventing a re-log/re-write on a
+     * differently-event-id'd redelivery. Exact-event-id redelivery is
+     * still independently blocked further upstream by
+     * stripe_webhook_events' unique stripe_event_id.
+     */
+    private function recordLatePaymentSucceededAfterExpirySweep(Payment $payment): void
+    {
+        /** @var Order $order */
+        $order = Order::where('id', $payment->order_id)
+            ->lockForUpdate()
+            ->first();
+
+        if ($order->status_reason === self::PAYMENT_SUCCEEDED_AFTER_EXPIRY_CANCELLATION_REASON) {
+            return;
+        }
+
+        $previousStatusReason = $order->status_reason;
+
+        $order->status_reason = self::PAYMENT_SUCCEEDED_AFTER_EXPIRY_CANCELLATION_REASON;
+        $order->save();
+
+        Log::critical('Payment succeeded on Stripe for a Payment already marked Canceled by the expiry sweep — Payment and Stripe state have diverged and require manual reconciliation.', [
+            'order_id' => $order->id,
+            'payment_id' => $payment->id,
+            'store_id' => $order->store_id,
+            'organization_id' => $order->organization_id,
+            'order_status' => $order->status->value,
+            'payment_status' => $payment->status->value,
+            'previous_status_reason' => $previousStatusReason,
+            'payment_expired' => true,
         ]);
     }
 

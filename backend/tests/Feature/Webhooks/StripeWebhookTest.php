@@ -712,6 +712,196 @@ class StripeWebhookTest extends TestCase
     }
 
     // -----------------------------------------------------------------
+    // Phase 9E-3 -- G3-A extension: expiry-sweep late payment detection
+    // -----------------------------------------------------------------
+
+    /**
+     * A Canceled Payment carrying the exact failure_reason
+     * PaymentExpirySweepService itself writes -- constructed directly
+     * (isolating the webhook-detection behavior under test from the
+     * sweep's own logic, already covered by PaymentExpirySweepServiceTest
+     * and by the full end-to-end test in StripeRefundWebhookTest.php).
+     *
+     * @return array{order: Order, payment: Payment, variant: ProductVariant, stripePaymentIntentId: string}
+     */
+    private function expirySweepCanceledFixture(int $stock = 10, float $price = 20.00, int $quantity = 2): array
+    {
+        $fixture = $this->checkoutFixture(stock: $stock, price: $price, quantity: $quantity);
+        $order = $fixture['order'];
+        $payment = $fixture['payment'];
+
+        $payment->status = PaymentStatus::Canceled;
+        $payment->failure_reason = 'expired';
+        $payment->save();
+
+        $order->status = OrderStatus::Cancelled;
+        $order->status_reason = 'expired';
+        $order->cancelled_at = now();
+        $order->save();
+
+        return $fixture;
+    }
+
+    public function test_9e3_detects_late_success_after_expiry_sweep_cancellation(): void
+    {
+        Log::spy();
+
+        $fixture = $this->expirySweepCanceledFixture();
+
+        $response = $this->postWebhook($this->buildEventPayload('evt_9e3_1', 'payment_intent.succeeded', $fixture['stripePaymentIntentId']));
+        $response->assertStatus(200);
+
+        $fixture['payment']->refresh();
+        $fixture['order']->refresh();
+
+        // Terminal Payment invariant preserved -- stays Canceled.
+        $this->assertSame('canceled', $fixture['payment']->status->value);
+        $this->assertSame('cancelled', $fixture['order']->status->value);
+        $this->assertSame('payment_succeeded_after_expiry_cancellation', $fixture['order']->status_reason);
+        $this->assertNull($fixture['order']->paid_at);
+        $this->assertNotNull($fixture['order']->cancelled_at);
+
+        Log::shouldHaveReceived('critical')
+            ->once()
+            ->withArgs(function (string $message, array $context) use ($fixture) {
+                return $context['order_id'] === $fixture['order']->id
+                    && $context['payment_id'] === $fixture['payment']->id
+                    && $context['store_id'] === $fixture['order']->store_id
+                    && $context['organization_id'] === $fixture['order']->organization_id
+                    && $context['order_status'] === 'cancelled'
+                    && $context['payment_status'] === 'canceled'
+                    && $context['previous_status_reason'] === 'expired'
+                    && $context['payment_expired'] === true;
+            });
+    }
+
+    /**
+     * A Canceled Payment with a genuine, non-expiry-sweep failure_reason
+     * (a Stripe-style cancellation reason, not the sweep's literal
+     * 'expired') must NOT trigger 9E-3 -- deliberately out of scope, per
+     * the approved design's narrow detection condition.
+     */
+    public function test_9e3_does_not_fire_for_ordinary_canceled_payment(): void
+    {
+        Log::spy();
+
+        $fixture = $this->checkoutFixture();
+        $order = $fixture['order'];
+        $payment = $fixture['payment'];
+
+        $payment->status = PaymentStatus::Canceled;
+        $payment->failure_reason = 'requested_by_customer';
+        $payment->save();
+
+        $order->status = OrderStatus::Cancelled;
+        $order->status_reason = 'merchant_cancelled';
+        $order->save();
+
+        $response = $this->postWebhook($this->buildEventPayload('evt_9e3_ordinary_1', 'payment_intent.succeeded', $fixture['stripePaymentIntentId']));
+        $response->assertStatus(200);
+
+        $payment->refresh();
+        $order->refresh();
+
+        $this->assertSame('canceled', $payment->status->value);
+        $this->assertSame('merchant_cancelled', $order->status_reason);
+        Log::shouldNotHaveReceived('critical');
+    }
+
+    public function test_9e3_exact_event_redelivery_does_not_duplicate_detection(): void
+    {
+        Log::spy();
+
+        $fixture = $this->expirySweepCanceledFixture();
+        $payload = $this->buildEventPayload('evt_9e3_dup_1', 'payment_intent.succeeded', $fixture['stripePaymentIntentId']);
+
+        $this->postWebhook($payload)->assertStatus(200);
+        $this->postWebhook($payload)->assertStatus(200);
+
+        $fixture['order']->refresh();
+        $this->assertSame('payment_succeeded_after_expiry_cancellation', $fixture['order']->status_reason);
+
+        // Second delivery is the identical Stripe event id -- caught by
+        // stripe_webhook_events' unique constraint before this branch
+        // ever runs again.
+        $this->assertDatabaseCount('stripe_webhook_events', 1);
+        Log::shouldHaveReceived('critical')->once();
+    }
+
+    /**
+     * Unlike G3-A, this branch never transitions Payment.status, so it
+     * does not inherit a second idempotency guard "for free" from a
+     * Payment terminal-status change -- the status_reason equality check
+     * inside recordLatePaymentSucceededAfterExpirySweep() is the sole
+     * mechanism preventing a re-log/re-write here.
+     */
+    public function test_9e3_different_event_id_after_first_detection_does_not_duplicate(): void
+    {
+        Log::spy();
+
+        $fixture = $this->expirySweepCanceledFixture();
+
+        $this->postWebhook($this->buildEventPayload('evt_9e3_evt_a', 'payment_intent.succeeded', $fixture['stripePaymentIntentId']))
+            ->assertStatus(200);
+
+        $response = $this->postWebhook($this->buildEventPayload('evt_9e3_evt_b', 'payment_intent.succeeded', $fixture['stripePaymentIntentId']));
+        $response->assertStatus(200);
+
+        $fixture['payment']->refresh();
+        $fixture['order']->refresh();
+
+        $this->assertSame('canceled', $fixture['payment']->status->value);
+        $this->assertSame('payment_succeeded_after_expiry_cancellation', $fixture['order']->status_reason);
+        $this->assertDatabaseCount('stripe_webhook_events', 2);
+        Log::shouldHaveReceived('critical')->once();
+    }
+
+    /**
+     * The existing G3-A merchant-cancellation path (Payment left
+     * non-terminal, unlike the expiry-sweep case) must remain completely
+     * unaffected by 9E-3 -- Payment DOES still transition to Succeeded
+     * here, and the ORIGINAL G3-A status_reason is used, not the new one.
+     */
+    public function test_9e3_does_not_affect_merchant_cancellation_g3a_behavior(): void
+    {
+        Log::spy();
+
+        $fixture = $this->checkoutFixture();
+        $order = $fixture['order'];
+        $order->status = OrderStatus::Cancelled;
+        $order->status_reason = 'merchant_cancelled';
+        $order->save();
+        // Payment is left exactly as checkoutFixture() created it
+        // (RequiresPayment) -- merchant cancellation never touches it.
+
+        $response = $this->postWebhook($this->buildEventPayload('evt_9e3_g3a_1', 'payment_intent.succeeded', $fixture['stripePaymentIntentId']));
+        $response->assertStatus(200);
+
+        $fixture['payment']->refresh();
+        $order->refresh();
+
+        $this->assertSame('succeeded', $fixture['payment']->status->value);
+        $this->assertSame('cancelled', $order->status->value);
+        $this->assertSame('payment_succeeded_after_closure', $order->status_reason);
+        Log::shouldHaveReceived('critical')->once();
+    }
+
+    public function test_9e3_creates_no_inventory_transaction_and_no_refund(): void
+    {
+        $fixture = $this->expirySweepCanceledFixture(stock: 10, quantity: 2, price: 10.00);
+        $countBefore = InventoryTransaction::count();
+
+        $this->postWebhook($this->buildEventPayload('evt_9e3_inv_1', 'payment_intent.succeeded', $fixture['stripePaymentIntentId']))
+            ->assertStatus(200);
+
+        $this->assertSame($countBefore, InventoryTransaction::count());
+        // Inventory stays exactly at the level it was before the webhook
+        // -- 9E-3 must never touch it, regardless of release state.
+        $this->assertDatabaseHas('inventory', ['product_variant_id' => $fixture['variant']->id, 'quantity_on_hand' => 8]);
+        $this->assertDatabaseCount('refunds', 0);
+    }
+
+    // -----------------------------------------------------------------
     // Predecessor matrix: RequiresPayment/Processing -> each terminal state
     // -----------------------------------------------------------------
 

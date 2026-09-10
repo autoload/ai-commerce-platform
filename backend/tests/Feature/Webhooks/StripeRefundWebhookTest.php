@@ -7,6 +7,7 @@ use App\Enums\InventoryTransactionReason;
 use App\Enums\OrderStatus;
 use App\Enums\PaymentStatus;
 use App\Enums\RefundStatus;
+use App\Exceptions\RefundNotEligibleException;
 use App\Models\Customer;
 use App\Models\Inventory;
 use App\Models\InventoryTransaction;
@@ -17,12 +18,19 @@ use App\Models\ProductVariant;
 use App\Models\Store;
 use App\Services\CheckoutOrderCreationService;
 use App\Services\InventoryAdjustmentService;
+use App\Services\OrderStatusUpdateService;
+use App\Services\PaymentExpirySweepService;
+use App\Services\RefundService;
+use App\Services\StripePaymentIntentGateway;
+use App\Services\StripeRefundGateway;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
 use Illuminate\Testing\TestResponse;
 use RuntimeException;
 use Stripe\WebhookSignature;
 use Tests\Concerns\CreatesTenantFixtures;
+use Tests\Doubles\FakePaymentIntentGateway;
+use Tests\Doubles\FakeRefundGateway;
 use Tests\TestCase;
 
 /**
@@ -453,5 +461,500 @@ class StripeRefundWebhookTest extends TestCase
         // 2 restock (fixture seeding) + 2 checkout (claim) + 2 refund (restoration) = 6.
         $this->assertDatabaseCount('inventory_transactions', 6);
         $this->assertSame(OrderStatus::Refunded, $fixture['order']->fresh()->status);
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 9E-2 (G3-B) — manual compensation refund
+    // -----------------------------------------------------------------
+
+    private function fakeRefundGateway(): FakeRefundGateway
+    {
+        $fake = new FakeRefundGateway;
+        $this->app->instance(StripeRefundGateway::class, $fake);
+
+        return $fake;
+    }
+
+    /**
+     * Builds a G3-B-eligible Order: a real checkout (real Checkout-reason
+     * claims via the unmodified CheckoutOrderCreationService), then
+     * simulates the cancel-then-late-succeed sequence directly (isolating
+     * the refund-webhook behavior under test from the sweep/merchant-
+     * cancel/G3-A webhook flows, each already covered by their own test
+     * suites) -- the same "isolate the transition under test" discipline
+     * StripeWebhookTest's own G3-A tests already establish. When
+     * $releaseInventory is true (the realistic case -- see
+     * test_g3b_end_to_end... below for the fully-real chain proving this
+     * is what the sweep/webhook flow actually produces), a Release row is
+     * inserted for every claim before the Order is marked Cancelled,
+     * exactly as StripePaymentWebhookService::releaseInventoryForPayment()
+     * / PaymentExpirySweepService would.
+     *
+     * @param  array<int, array{stock: int, price: float, quantity: int}>  $items
+     * @return array{order: Order, payment: Payment, variants: array<int, ProductVariant>, stripePaymentIntentId: string}
+     */
+    private function cancelledAfterClosureFixture(array $items, bool $releaseInventory = true): array
+    {
+        $org = $this->activeOrganization();
+        $store = Store::factory()->forOrganization($org)->create();
+        $customer = Customer::factory()->forStore($store)->create();
+
+        $lineItems = [];
+        $variants = [];
+
+        foreach ($items as $spec) {
+            $product = Product::factory()->forStore($store)->create();
+            $variant = ProductVariant::factory()->forProduct($product)->create([
+                'price' => $spec['price'],
+                'status' => CatalogStatus::Active,
+            ]);
+
+            app(InventoryAdjustmentService::class)->adjust(
+                $variant, $spec['stock'], InventoryTransactionReason::Restock, null, null
+            );
+
+            $lineItems[] = ['variant' => $variant, 'quantity' => $spec['quantity']];
+            $variants[] = $variant;
+        }
+
+        $stripePaymentIntentId = 'pi_test_'.Str::random(24);
+
+        $order = app(CheckoutOrderCreationService::class)->createPendingOrder(
+            $customer,
+            $store,
+            $lineItems,
+            [
+                'recipient_name' => 'Jane Doe',
+                'line1' => '123 Main St',
+                'city' => 'Springfield',
+                'state' => 'IL',
+                'postal_code' => '62701',
+                'country' => 'US',
+            ],
+            $stripePaymentIntentId,
+        );
+
+        $payment = $order->payments->first();
+
+        if ($releaseInventory) {
+            foreach ($order->items as $item) {
+                app(InventoryAdjustmentService::class)->adjust(
+                    $item->variant, $item->quantity, InventoryTransactionReason::Release, null, null, $item, $payment
+                );
+            }
+        }
+
+        $order->status = OrderStatus::Cancelled;
+        $order->status_reason = 'expired';
+        $order->cancelled_at = now();
+        $order->save();
+
+        // The late webhook succeeding -- Payment transitions, G3-A sets
+        // the alarm (mirrors StripePaymentWebhookService's own real
+        // recordPaymentSucceededAfterClosure() behavior, constructed
+        // directly here since that transition is StripeWebhookTest's own
+        // scope, not this file's).
+        $payment->status = PaymentStatus::Succeeded;
+        $payment->save();
+
+        $order->status_reason = 'payment_succeeded_after_closure';
+        $order->save();
+
+        return [
+            'order' => $order->fresh(),
+            'payment' => $payment->fresh(),
+            'variants' => $variants,
+            'stripePaymentIntentId' => $stripePaymentIntentId,
+        ];
+    }
+
+    public function test_g3b_refund_does_not_double_credit_already_released_inventory(): void
+    {
+        $fixture = $this->cancelledAfterClosureFixture([['stock' => 10, 'price' => 20.00, 'quantity' => 2]]);
+        $variant = $fixture['variants'][0];
+        $refundId = 're_test_'.Str::random(16);
+
+        $onHandBefore = Inventory::where('product_variant_id', $variant->id)->first()->quantity_on_hand;
+        $ledgerCountBefore = InventoryTransaction::count();
+
+        $payload = $this->buildRefundEventPayload(
+            'evt_g3b_double_credit_1', 'refund.created', $fixture['stripePaymentIntentId'], $refundId, 'succeeded', 4000
+        );
+
+        $response = $this->postWebhook($payload);
+
+        $response->assertOk();
+        $this->assertDatabaseHas('refunds', ['stripe_refund_id' => $refundId, 'status' => 'succeeded']);
+
+        // Inventory was already fully returned by the prior Release -- the
+        // refund must NOT credit it a second time.
+        $this->assertSame($onHandBefore, Inventory::where('product_variant_id', $variant->id)->first()->quantity_on_hand);
+        $this->assertSame($ledgerCountBefore, InventoryTransaction::count());
+        $this->assertDatabaseMissing('inventory_transactions', [
+            'payment_id' => $fixture['payment']->id,
+            'reason' => 'refund',
+        ]);
+
+        // Order stays Cancelled; status_reason resolves to the "handled" value.
+        $order = $fixture['order']->fresh();
+        $this->assertSame(OrderStatus::Cancelled, $order->status);
+        $this->assertSame('payment_refunded_after_closure', $order->status_reason);
+    }
+
+    /**
+     * A constructed edge case (not the realistic every-time path -- see
+     * the double-credit test above for that) proving the guard's fallback
+     * branch: a G3-B-eligible order whose inventory was NOT actually
+     * released still gets normal restoration, exactly as any other
+     * refund would.
+     */
+    public function test_g3b_refund_restores_inventory_normally_when_no_prior_release_exists(): void
+    {
+        $fixture = $this->cancelledAfterClosureFixture(
+            [['stock' => 10, 'price' => 20.00, 'quantity' => 2]],
+            releaseInventory: false,
+        );
+        $variant = $fixture['variants'][0];
+        $refundId = 're_test_'.Str::random(16);
+
+        $payload = $this->buildRefundEventPayload(
+            'evt_g3b_no_release_1', 'refund.created', $fixture['stripePaymentIntentId'], $refundId, 'succeeded', 4000
+        );
+
+        $response = $this->postWebhook($payload);
+
+        $response->assertOk();
+        // 10 restocked, -2 claimed at checkout (8 on hand), +2 restored (back to 10).
+        $this->assertSame(10, Inventory::where('product_variant_id', $variant->id)->first()->quantity_on_hand);
+        $this->assertDatabaseHas('inventory_transactions', [
+            'payment_id' => $fixture['payment']->id,
+            'reason' => 'refund',
+            'delta' => 2,
+        ]);
+    }
+
+    /**
+     * A deliberately mixed state -- only one of two line items' claims was
+     * released -- proving the guard is evaluated per order_item_id, not
+     * once for the whole payment.
+     */
+    public function test_g3b_refund_handles_mixed_released_and_unreleased_line_items_independently(): void
+    {
+        $fixture = $this->cancelledAfterClosureFixture([
+            ['stock' => 10, 'price' => 10.00, 'quantity' => 2],
+            ['stock' => 10, 'price' => 10.00, 'quantity' => 3],
+        ], releaseInventory: false);
+
+        $order = $fixture['order'];
+        $payment = $fixture['payment'];
+        $variantOne = $fixture['variants'][0];
+        $variantTwo = $fixture['variants'][1];
+
+        $firstItem = $order->items()->where('product_variant_id', $variantOne->id)->first();
+        app(InventoryAdjustmentService::class)->adjust(
+            $firstItem->variant, $firstItem->quantity, InventoryTransactionReason::Release, null, null, $firstItem, $payment
+        );
+
+        $refundId = 're_test_'.Str::random(16);
+        $payload = $this->buildRefundEventPayload(
+            'evt_g3b_mixed_1', 'refund.created', $fixture['stripePaymentIntentId'], $refundId, 'succeeded', 5000
+        );
+
+        $response = $this->postWebhook($payload);
+
+        $response->assertOk();
+        // Variant one: already released -- stays at the released level, no double credit.
+        $this->assertSame(10, Inventory::where('product_variant_id', $variantOne->id)->first()->quantity_on_hand);
+        // Variant two: never released -- normal refund restoration fires (7 claimed -> 10 restored).
+        $this->assertSame(10, Inventory::where('product_variant_id', $variantTwo->id)->first()->quantity_on_hand);
+
+        $this->assertDatabaseMissing('inventory_transactions', [
+            'product_variant_id' => $variantOne->id,
+            'payment_id' => $payment->id,
+            'reason' => 'refund',
+        ]);
+        $this->assertDatabaseHas('inventory_transactions', [
+            'product_variant_id' => $variantTwo->id,
+            'payment_id' => $payment->id,
+            'reason' => 'refund',
+            'delta' => 3,
+        ]);
+    }
+
+    public function test_g3b_duplicate_refund_webhook_does_not_double_credit_or_re_resolve(): void
+    {
+        $fixture = $this->cancelledAfterClosureFixture([['stock' => 10, 'price' => 20.00, 'quantity' => 2]]);
+        $variant = $fixture['variants'][0];
+        $refundId = 're_test_'.Str::random(16);
+
+        $this->postWebhook($this->buildRefundEventPayload(
+            'evt_g3b_dup_1', 'refund.created', $fixture['stripePaymentIntentId'], $refundId, 'succeeded', 4000
+        ))->assertOk();
+
+        $onHandAfterFirst = Inventory::where('product_variant_id', $variant->id)->first()->quantity_on_hand;
+        $ledgerCountAfterFirst = InventoryTransaction::count();
+
+        // A different event id redelivering the same already-succeeded refund.
+        $response = $this->postWebhook($this->buildRefundEventPayload(
+            'evt_g3b_dup_2', 'refund.updated', $fixture['stripePaymentIntentId'], $refundId, 'succeeded', 4000
+        ));
+
+        $response->assertOk();
+        $this->assertSame($onHandAfterFirst, Inventory::where('product_variant_id', $variant->id)->first()->quantity_on_hand);
+        $this->assertSame($ledgerCountAfterFirst, InventoryTransaction::count());
+        $this->assertSame('payment_refunded_after_closure', $fixture['order']->fresh()->status_reason);
+    }
+
+    public function test_normal_refund_does_not_set_g3b_resolved_status_reason(): void
+    {
+        $fixture = $this->paidFixture([['stock' => 10, 'price' => 20.00, 'quantity' => 2]]);
+        $refundId = 're_test_'.Str::random(16);
+
+        $this->postWebhook($this->buildRefundEventPayload(
+            'evt_normal_g3b_check_1', 'refund.created', $fixture['stripePaymentIntentId'], $refundId, 'succeeded', 4000
+        ))->assertOk();
+
+        $order = $fixture['order']->fresh();
+        $this->assertSame(OrderStatus::Refunded, $order->status);
+        $this->assertNull($order->status_reason);
+    }
+
+    /**
+     * The full realistic chain, end to end, with no constructed
+     * intermediate state: real checkout -> real merchant cancellation of
+     * the still-pending order (via OrderStatusUpdateService, the same
+     * service OrderController uses) -> a real late payment_intent.succeeded
+     * webhook (G3-A fires) -> a real merchant-initiated refund through
+     * RefundService (the same code path RefundController calls) -> a real
+     * refund.updated succeeded webhook (G3-B resolves).
+     *
+     * Deliberately uses merchant cancellation, not the expiry sweep, as
+     * the realistic trigger -- confirmed by direct inspection (and by the
+     * documentation test immediately below) that OrderStatusUpdateService
+     * does NOT touch Payment or inventory when cancelling a Pending order,
+     * so the Payment is still non-terminal when the late webhook arrives
+     * and G3-A's handleSucceeded() guard lets it through; inventory was
+     * never released, so the refund's normal (non-double-credit) Refund
+     * restoration path is what correctly returns it. See the finding
+     * documented on the next test for why the expiry-sweep path does NOT
+     * currently reach G3-A at all.
+     */
+    public function test_g3b_end_to_end_merchant_cancellation_late_payment_and_manual_refund(): void
+    {
+        $org = $this->activeOrganization();
+        $store = Store::factory()->forOrganization($org)->create();
+        $customer = Customer::factory()->forStore($store)->create();
+        $product = Product::factory()->forStore($store)->create();
+        $variant = ProductVariant::factory()->forProduct($product)->create([
+            'price' => 20.00,
+            'status' => CatalogStatus::Active,
+        ]);
+
+        app(InventoryAdjustmentService::class)->adjust(
+            $variant, 10, InventoryTransactionReason::Restock, null, null
+        );
+
+        $stripePaymentIntentId = 'pi_test_'.Str::random(24);
+
+        $order = app(CheckoutOrderCreationService::class)->createPendingOrder(
+            $customer,
+            $store,
+            [['variant' => $variant, 'quantity' => 2]],
+            [
+                'recipient_name' => 'Jane Doe',
+                'line1' => '123 Main St',
+                'city' => 'Springfield',
+                'state' => 'IL',
+                'postal_code' => '62701',
+                'country' => 'US',
+            ],
+            $stripePaymentIntentId,
+        );
+
+        $payment = $order->payments->first();
+        $this->assertSame(8, Inventory::where('product_variant_id', $variant->id)->first()->quantity_on_hand);
+
+        // Real merchant cancellation of the still-pending order.
+        app(OrderStatusUpdateService::class)->transition($order, OrderStatus::Cancelled);
+
+        $order->refresh();
+        $this->assertSame(OrderStatus::Cancelled, $order->status);
+        $this->assertNull($order->status_reason);
+        // Confirmed: merchant cancellation does not release inventory.
+        $this->assertSame(8, Inventory::where('product_variant_id', $variant->id)->first()->quantity_on_hand);
+
+        // The residual race: Stripe's real PaymentIntent succeeds after
+        // the order was already cancelled -- a real
+        // payment_intent.succeeded webhook arrives. Payment is still
+        // non-terminal (RequiresPayment), so handleSucceeded() proceeds.
+        $succeededPayload = [
+            'id' => 'evt_g3b_e2e_succeeded',
+            'object' => 'event',
+            'type' => 'payment_intent.succeeded',
+            'created' => now()->timestamp,
+            'data' => [
+                'object' => [
+                    'id' => $stripePaymentIntentId,
+                    'object' => 'payment_intent',
+                    'amount' => 4000,
+                    'currency' => 'usd',
+                    'status' => 'succeeded',
+                ],
+            ],
+        ];
+        $this->postWebhook($succeededPayload)->assertOk();
+
+        $order->refresh();
+        $payment->refresh();
+        $this->assertSame(OrderStatus::Cancelled, $order->status); // never reopened
+        $this->assertSame('payment_succeeded_after_closure', $order->status_reason);
+        $this->assertSame(PaymentStatus::Succeeded, $payment->status);
+
+        // Merchant-initiated G3-B compensation refund, through the real
+        // RefundService -- the same code path RefundController calls.
+        $this->fakeRefundGateway();
+        $result = app(RefundService::class)->refund($order, 'Late payment after cancellation', 'g3b-e2e-key', null);
+        $refund = $result['refund'];
+        $this->assertSame('pending', $refund->status->value);
+
+        // The resulting refund.updated webhook -- resolves status_reason,
+        // and restores inventory normally (no prior Release exists for
+        // this claim, since merchant cancellation never released it).
+        $refundSucceededPayload = $this->buildRefundEventPayload(
+            'evt_g3b_e2e_refund_succeeded', 'refund.updated', $stripePaymentIntentId, $refund->stripe_refund_id, 'succeeded', 4000
+        );
+        $this->postWebhook($refundSucceededPayload)->assertOk();
+
+        $order->refresh();
+        $this->assertSame(OrderStatus::Cancelled, $order->status); // still never reopened
+        $this->assertSame('payment_refunded_after_closure', $order->status_reason);
+        $this->assertDatabaseHas('refunds', ['id' => $refund->id, 'status' => 'succeeded']);
+        $this->assertSame(10, Inventory::where('product_variant_id', $variant->id)->first()->quantity_on_hand);
+        $this->assertDatabaseHas('inventory_transactions', [
+            'product_variant_id' => $variant->id,
+            'payment_id' => $payment->id,
+            'reason' => 'refund',
+            'delta' => 2,
+        ]);
+    }
+
+    /**
+     * Phase 9E-3 -- the full realistic chain, end to end: real checkout
+     * -> real expiry sweep (Payment Canceled/'expired', Order
+     * Cancelled/'expired', inventory genuinely released) -> a real late
+     * payment_intent.succeeded webhook -> 9E-3 detection.
+     *
+     * This scenario was previously undetected (see the G3-B implementation
+     * notes: PaymentExpirySweepService marks Payment Canceled in the same
+     * transaction that releases inventory and cancels the Order, so
+     * handleSucceeded()'s pre-existing terminal-status guard silently
+     * discarded a genuinely later payment_intent.succeeded before G3-A's
+     * own alarm logic could ever run). Phase 9E-3 closes that gap with a
+     * narrow, separate detection branch -- this test proves the fix holds
+     * across the entire real chain, not just the webhook step in
+     * isolation, and that the terminal Payment invariant, inventory, and
+     * G3-B eligibility are all left exactly as the approved design
+     * requires.
+     */
+    public function test_9e3_end_to_end_expiry_sweep_late_payment_detection(): void
+    {
+        config(['services.stripe.checkout_expiry_minutes' => 30]);
+        $this->app->instance(StripePaymentIntentGateway::class, new FakePaymentIntentGateway);
+
+        $org = $this->activeOrganization();
+        $store = Store::factory()->forOrganization($org)->create();
+        $customer = Customer::factory()->forStore($store)->create();
+        $product = Product::factory()->forStore($store)->create();
+        $variant = ProductVariant::factory()->forProduct($product)->create([
+            'price' => 20.00,
+            'status' => CatalogStatus::Active,
+        ]);
+
+        app(InventoryAdjustmentService::class)->adjust(
+            $variant, 10, InventoryTransactionReason::Restock, null, null
+        );
+
+        $stripePaymentIntentId = 'pi_test_'.Str::random(24);
+
+        $this->travelTo(now()->subMinutes(35));
+        $order = app(CheckoutOrderCreationService::class)->createPendingOrder(
+            $customer,
+            $store,
+            [['variant' => $variant, 'quantity' => 2]],
+            [
+                'recipient_name' => 'Jane Doe',
+                'line1' => '123 Main St',
+                'city' => 'Springfield',
+                'state' => 'IL',
+                'postal_code' => '62701',
+                'country' => 'US',
+            ],
+            $stripePaymentIntentId,
+        );
+        $this->travelBack();
+
+        $payment = $order->payments->first();
+
+        // Real expiry sweep -- cancels the order, releases inventory.
+        $counts = app(PaymentExpirySweepService::class)->sweep();
+        $this->assertSame(1, $counts['cancelled']);
+
+        $order->refresh();
+        $payment->refresh();
+        $this->assertSame(OrderStatus::Cancelled, $order->status);
+        $this->assertSame('expired', $order->status_reason);
+        $this->assertSame(PaymentStatus::Canceled, $payment->status);
+        $this->assertSame('expired', $payment->failure_reason);
+        $this->assertDatabaseHas('inventory', ['product_variant_id' => $variant->id, 'quantity_on_hand' => 10]);
+
+        $ledgerCountBeforeWebhook = InventoryTransaction::count();
+
+        // The residual race: Stripe's real PaymentIntent actually
+        // succeeds after the sweep already canceled it locally.
+        $succeededPayload = [
+            'id' => 'evt_9e3_e2e_succeeded',
+            'object' => 'event',
+            'type' => 'payment_intent.succeeded',
+            'created' => now()->timestamp,
+            'data' => [
+                'object' => [
+                    'id' => $stripePaymentIntentId,
+                    'object' => 'payment_intent',
+                    'amount' => 4000,
+                    'currency' => 'usd',
+                    'status' => 'succeeded',
+                ],
+            ],
+        ];
+        $this->postWebhook($succeededPayload)->assertOk();
+
+        $order->refresh();
+        $payment->refresh();
+
+        // Terminal Payment invariant preserved.
+        $this->assertSame(PaymentStatus::Canceled, $payment->status);
+        // Order never reopened.
+        $this->assertSame(OrderStatus::Cancelled, $order->status);
+        $this->assertSame('payment_succeeded_after_expiry_cancellation', $order->status_reason);
+
+        // No inventory mutation of any kind.
+        $this->assertSame($ledgerCountBeforeWebhook, InventoryTransaction::count());
+        $this->assertDatabaseHas('inventory', ['product_variant_id' => $variant->id, 'quantity_on_hand' => 10]);
+
+        // No Refund, no money movement.
+        $this->assertDatabaseCount('refunds', 0);
+
+        // Durable webhook evidence.
+        $this->assertDatabaseHas('stripe_webhook_events', [
+            'stripe_event_id' => 'evt_9e3_e2e_succeeded',
+            'type' => 'payment_intent.succeeded',
+        ]);
+
+        // G3-B remains ineligible: no Succeeded Payment exists for this
+        // order, and its status_reason is the distinct 9E-3 value, not
+        // G3-A's payment_succeeded_after_closure.
+        $this->fakeRefundGateway();
+        $this->expectException(RefundNotEligibleException::class);
+        app(RefundService::class)->refund($order, null, '9e3-e2e-key', null);
     }
 }

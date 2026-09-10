@@ -67,6 +67,16 @@ export type Order = {
 /** The order statuses a refund action may be attempted from. */
 export const REFUNDABLE_ORDER_STATUSES: OrderStatus[] = ['paid', 'processing', 'shipped', 'completed']
 
+/**
+ * Phase 9E-2 (G3-B) — mirrors the backend's exact literal
+ * (StripePaymentWebhookService::PAYMENT_SUCCEEDED_AFTER_CLOSURE_REASON /
+ * RefundService::G3B_CLOSURE_ALARM_REASON). A Cancelled order carrying
+ * this exact status_reason is the one narrow exception to
+ * REFUNDABLE_ORDER_STATUSES above -- never a general "Cancelled orders
+ * are refundable" rule.
+ */
+export const PAYMENT_SUCCEEDED_AFTER_CLOSURE_REASON = 'payment_succeeded_after_closure'
+
 type OrderListMeta = {
   current_page: number
   last_page: number

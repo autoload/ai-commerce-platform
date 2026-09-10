@@ -20,6 +20,7 @@ use App\Services\InventoryAdjustmentService;
 use App\Services\StripeRefundGateway;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Stripe\ErrorObject;
 use Stripe\Exception\ApiConnectionException;
 use Stripe\Exception\IdempotencyException;
@@ -270,6 +271,169 @@ class RefundManagementTest extends TestCase
         );
 
         $response->assertStatus(422);
+    }
+
+    // ---- Phase 9E-2 (G3-B) eligibility --------------------------------------
+
+    /**
+     * Regression proof that RefundService::isRefundableOrderState()'s
+     * extraction (Phase 9E-2) didn't change eligibility for the three
+     * REFUNDABLE_ORDER_STATUSES members not otherwise exercised by
+     * test_owner_can_refund_a_paid_order() above.
+     *
+     * @return array{OrderStatus}[]
+     */
+    public static function otherRefundableStatusesProvider(): array
+    {
+        return [
+            'processing' => [OrderStatus::Processing],
+            'shipped' => [OrderStatus::Shipped],
+            'completed' => [OrderStatus::Completed],
+        ];
+    }
+
+    #[DataProvider('otherRefundableStatusesProvider')]
+    public function test_other_refundable_statuses_remain_refundable(OrderStatus $status): void
+    {
+        $this->fakeGateway();
+        $org = $this->activeOrganization();
+        $owner = $this->memberWithRole($org, OrganizationRole::Owner);
+        $store = Store::factory()->forOrganization($org)->create();
+        $order = Order::factory()->forStore($store)->create();
+        $order->status = $status;
+        $order->save();
+        $payment = Payment::factory()->forOrder($order)->create();
+        $payment->status = PaymentStatus::Succeeded;
+        $payment->save();
+        $token = $owner->createToken('t')->plainTextToken;
+
+        $response = $this->withToken($token)->postJson(
+            "/api/stores/{$store->id}/orders/{$order->id}/refund",
+            ['idempotency_key' => 'refund-key-'.$status->value]
+        );
+
+        $response->assertCreated();
+    }
+
+    public function test_ordinary_cancelled_order_cannot_be_refunded(): void
+    {
+        $this->fakeGateway();
+        $org = $this->activeOrganization();
+        $owner = $this->memberWithRole($org, OrganizationRole::Owner);
+        $store = Store::factory()->forOrganization($org)->create();
+        $order = Order::factory()->forStore($store)->create();
+        $order->status = OrderStatus::Cancelled;
+        $order->status_reason = 'merchant_cancelled';
+        $order->save();
+        $payment = Payment::factory()->forOrder($order)->create();
+        $payment->status = PaymentStatus::Succeeded;
+        $payment->save();
+        $token = $owner->createToken('t')->plainTextToken;
+
+        $response = $this->withToken($token)->postJson(
+            "/api/stores/{$store->id}/orders/{$order->id}/refund",
+            ['idempotency_key' => 'refund-key-1']
+        );
+
+        $response->assertStatus(422);
+        $this->assertDatabaseCount('refunds', 0);
+    }
+
+    /**
+     * The one narrow G3-B carve-out: a Cancelled order whose status_reason
+     * is exactly the G3-A alarm value, with a Succeeded Payment, is
+     * eligible -- not because it's Cancelled, but because of the exact
+     * reason string (proven distinct from an ordinary Cancelled order by
+     * the test immediately above, and from a differently-reasoned
+     * Cancelled order by the next test below).
+     */
+    public function test_cancelled_order_with_closure_alarm_is_refundable(): void
+    {
+        $this->fakeGateway();
+        $org = $this->activeOrganization();
+        $owner = $this->memberWithRole($org, OrganizationRole::Owner);
+        $store = Store::factory()->forOrganization($org)->create();
+        $order = Order::factory()->forStore($store)->create();
+        $order->status = OrderStatus::Cancelled;
+        $order->status_reason = 'payment_succeeded_after_closure';
+        $order->save();
+        $payment = Payment::factory()->forOrder($order)->create();
+        $payment->status = PaymentStatus::Succeeded;
+        $payment->save();
+        $token = $owner->createToken('t')->plainTextToken;
+
+        $response = $this->withToken($token)->postJson(
+            "/api/stores/{$store->id}/orders/{$order->id}/refund",
+            ['idempotency_key' => 'refund-key-1']
+        );
+
+        $response->assertCreated();
+        $this->assertDatabaseHas('refunds', [
+            'order_id' => $order->id,
+            'payment_id' => $payment->id,
+            'status' => 'pending',
+        ]);
+
+        // The order itself must not have been touched by RefundService --
+        // it stays exactly as it was; only the (separate, webhook-driven)
+        // successful-refund transition resolves status_reason.
+        $order->refresh();
+        $this->assertSame('cancelled', $order->status->value);
+        $this->assertSame('payment_succeeded_after_closure', $order->status_reason);
+    }
+
+    /**
+     * A Cancelled order with a Succeeded Payment but a DIFFERENT
+     * status_reason (e.g. the expiry sweep's own value) must still be
+     * rejected -- proves this is not "any Cancelled order with a
+     * succeeded payment is refundable," only the exact alarm string.
+     */
+    public function test_cancelled_order_with_different_status_reason_cannot_be_refunded(): void
+    {
+        $this->fakeGateway();
+        $org = $this->activeOrganization();
+        $owner = $this->memberWithRole($org, OrganizationRole::Owner);
+        $store = Store::factory()->forOrganization($org)->create();
+        $order = Order::factory()->forStore($store)->create();
+        $order->status = OrderStatus::Cancelled;
+        $order->status_reason = 'expired';
+        $order->save();
+        $payment = Payment::factory()->forOrder($order)->create();
+        $payment->status = PaymentStatus::Succeeded;
+        $payment->save();
+        $token = $owner->createToken('t')->plainTextToken;
+
+        $response = $this->withToken($token)->postJson(
+            "/api/stores/{$store->id}/orders/{$order->id}/refund",
+            ['idempotency_key' => 'refund-key-1']
+        );
+
+        $response->assertStatus(422);
+        $this->assertDatabaseCount('refunds', 0);
+    }
+
+    public function test_cancelled_order_with_closure_alarm_but_no_succeeded_payment_cannot_be_refunded(): void
+    {
+        $this->fakeGateway();
+        $org = $this->activeOrganization();
+        $owner = $this->memberWithRole($org, OrganizationRole::Owner);
+        $store = Store::factory()->forOrganization($org)->create();
+        $order = Order::factory()->forStore($store)->create();
+        $order->status = OrderStatus::Cancelled;
+        $order->status_reason = 'payment_succeeded_after_closure';
+        $order->save();
+        // No Payment row at all -- the order-status branch now passes,
+        // but the separate, unmodified "succeeded payment exists" check
+        // must still reject it.
+        $token = $owner->createToken('t')->plainTextToken;
+
+        $response = $this->withToken($token)->postJson(
+            "/api/stores/{$store->id}/orders/{$order->id}/refund",
+            ['idempotency_key' => 'refund-key-1']
+        );
+
+        $response->assertStatus(422);
+        $this->assertDatabaseCount('refunds', 0);
     }
 
     // ---- Idempotency / concurrency ----------------------------------------

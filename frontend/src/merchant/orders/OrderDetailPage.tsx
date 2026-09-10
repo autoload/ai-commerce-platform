@@ -1,7 +1,13 @@
 import { useRef, useState, type FormEvent } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { ApiError } from '../../services/apiClient'
-import { REFUNDABLE_ORDER_STATUSES, type MerchantOrderStatus, type OrderStatus, type RefundStatus } from '../../services/ordersApi'
+import {
+  PAYMENT_SUCCEEDED_AFTER_CLOSURE_REASON,
+  REFUNDABLE_ORDER_STATUSES,
+  type MerchantOrderStatus,
+  type OrderStatus,
+  type RefundStatus,
+} from '../../services/ordersApi'
 import { useMerchantAuth } from '../auth/MerchantAuthContext'
 import { useCreateRefund, useOrder, useUpdateOrderStatus } from './useOrders'
 
@@ -83,7 +89,13 @@ export function OrderDetailPage() {
   const nextAction = NEXT_ACTIONS[order.status]
   const updateErrorMessage = updateStatus.error instanceof ApiError ? updateStatus.error.message : null
   const refundErrorMessage = createRefund.error instanceof ApiError ? createRefund.error.message : null
-  const canRefund = canManage && REFUNDABLE_ORDER_STATUSES.includes(order.status)
+  // Phase 9E-2 (G3-B) — the one narrow exception to REFUNDABLE_ORDER_STATUSES:
+  // a Cancelled order whose status_reason is exactly the G3-A alarm value.
+  // Never a general "Cancelled orders are refundable" rule -- the backend's
+  // own RefundService.isRefundableOrderState() remains fully authoritative
+  // regardless of what this computes.
+  const isG3bEligible = order.status === 'cancelled' && order.status_reason === PAYMENT_SUCCEEDED_AFTER_CLOSURE_REASON
+  const canRefund = canManage && (REFUNDABLE_ORDER_STATUSES.includes(order.status) || isG3bEligible)
 
   async function handleTransition(target: MerchantOrderStatus) {
     try {
@@ -183,8 +195,17 @@ export function OrderDetailPage() {
             className="mt-4 space-y-3 border-t border-slate-200 pt-4 dark:border-slate-800"
           >
             <p className="text-sm text-slate-700 dark:text-slate-300">
-              This will fully refund <strong>${order.total}</strong> to the customer via Stripe. Partial refunds are
-              not supported.
+              {isG3bEligible ? (
+                <>
+                  This order was cancelled, but the payment succeeded. Refunding will return{' '}
+                  <strong>${order.total}</strong> to the customer via Stripe. The order will remain cancelled.
+                </>
+              ) : (
+                <>
+                  This will fully refund <strong>${order.total}</strong> to the customer via Stripe. Partial refunds
+                  are not supported.
+                </>
+              )}
             </p>
             <div>
               <label htmlFor="reason" className="block text-sm font-medium text-slate-700 dark:text-slate-300">
