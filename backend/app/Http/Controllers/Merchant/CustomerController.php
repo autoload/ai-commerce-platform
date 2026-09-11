@@ -2,12 +2,12 @@
 
 namespace App\Http\Controllers\Merchant;
 
-use App\Enums\RefundStatus;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\CustomerResource;
 use App\Models\Customer;
 use App\Models\Refund;
 use App\Support\SalesClassification;
+use App\Support\SalesRefundClassification;
 use App\Support\TenantContext;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
@@ -96,7 +96,12 @@ class CustomerController extends Controller
      * unconstrained aggregate attempt against the intermediate `orders`
      * relation using the same column ('amount'), which orders has no
      * column named, producing broken SQL. This subquery avoids that
-     * entirely while remaining a single query, no N+1.
+     * entirely while remaining a single query, no N+1. The predicate
+     * itself (which succeeded refunds count as a Sales Refund) is
+     * App\Support\SalesRefundClassification — promoted out of this class
+     * during the Analytics v1 build so AnalyticsService's date-bounded,
+     * store-wide version and this all-time, per-customer version can never
+     * disagree (pure extraction, identical SQL, no behavior change).
      *
      * @param  Builder<Customer>  $query
      * @return Builder<Customer>
@@ -108,12 +113,11 @@ class CustomerController extends Controller
             ->withSum(['orders as gross_sales_amount' => function (Builder $q) {
                 SalesClassification::scopeGrossSaleOrders($q);
             }], 'total')
-            ->addSelect(['sales_refunds' => Refund::query()
-                ->selectRaw('SUM(refunds.amount)')
-                ->join('orders', 'orders.id', '=', 'refunds.order_id')
-                ->whereColumn('orders.customer_id', 'customers.id')
-                ->where('refunds.status', RefundStatus::Succeeded)
-                ->whereIn('orders.status', SalesClassification::GROSS_SALE_STATUSES),
+            ->addSelect(['sales_refunds' => SalesRefundClassification::scopeSuccessfulSalesRefunds(
+                Refund::query()
+                    ->join('orders', 'orders.id', '=', 'refunds.order_id')
+                    ->whereColumn('orders.customer_id', 'customers.id')
+            )->selectRaw('SUM(refunds.amount)'),
             ]);
     }
 

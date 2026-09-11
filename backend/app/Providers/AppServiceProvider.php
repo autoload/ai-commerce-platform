@@ -3,6 +3,7 @@
 namespace App\Providers;
 
 use App\Models\ProductVariant;
+use App\Policies\AnalyticsPolicy;
 use App\Policies\InventoryPolicy;
 use App\Services\StripeApiPaymentIntentGateway;
 use App\Services\StripeApiRefundGateway;
@@ -38,5 +39,12 @@ class AppServiceProvider extends ServiceProvider
         // named to match that convention — it's explicitly registered here
         // instead.
         Gate::policy(ProductVariant::class, InventoryPolicy::class);
+
+        // Analytics has no Eloquent model of its own to authorize
+        // against — Gate::define() with an explicit ability name is the
+        // established alternative in this codebase whenever a Policy
+        // can't be found by convention (see the InventoryPolicy
+        // registration above).
+        Gate::define('viewAnalytics', [AnalyticsPolicy::class, 'view']);
     }
 }

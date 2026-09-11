@@ -6,6 +6,7 @@ use App\Http\Controllers\Customer\CheckoutController;
 use App\Http\Controllers\Customer\CustomerAuthController;
 use App\Http\Controllers\Customer\OrderController as CustomerOrderController;
 use App\Http\Controllers\Customer\RetryPaymentController;
+use App\Http\Controllers\Merchant\AnalyticsController;
 use App\Http\Controllers\Merchant\CategoryController;
 use App\Http\Controllers\Merchant\CustomerController;
 use App\Http\Controllers\Merchant\InventoryController;
@@ -74,6 +75,14 @@ Route::middleware(['auth:merchant', 'tenant.merchant'])->group(function () {
         // store-scoped, same as Product/Category/Order — no new middleware.
         Route::get('/stores/{store}/customers', [CustomerController::class, 'index'])->name('customers.index');
         Route::get('/stores/{store}/customers/{customer}', [CustomerController::class, 'show'])->name('customers.show');
+
+        // Analytics v1 — four focused, store-scoped read endpoints (no
+        // combined dashboard endpoint), gated by AnalyticsPolicy via the
+        // 'viewAnalytics' ability (Owner/Store Admin only, Staff 403).
+        Route::get('/stores/{store}/analytics/sales', [AnalyticsController::class, 'sales'])->name('analytics.sales');
+        Route::get('/stores/{store}/analytics/orders', [AnalyticsController::class, 'orders'])->name('analytics.orders');
+        Route::get('/stores/{store}/analytics/products', [AnalyticsController::class, 'products'])->name('analytics.products');
+        Route::get('/stores/{store}/analytics/customers', [AnalyticsController::class, 'customers'])->name('analytics.customers');
     });
 });
 

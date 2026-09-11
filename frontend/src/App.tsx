@@ -27,6 +27,7 @@ import { MerchantAuthProvider } from './merchant/auth/MerchantAuthContext'
 import { MerchantLoginPage } from './merchant/auth/MerchantLoginPage'
 import { MerchantProtectedRoute } from './merchant/auth/MerchantProtectedRoute'
 import { MerchantRegisterPage } from './merchant/auth/MerchantRegisterPage'
+import { AnalyticsPage } from './merchant/analytics/AnalyticsPage'
 import { CategoryCreatePage } from './merchant/categories/CategoryCreatePage'
 import { CategoryDetailPage } from './merchant/categories/CategoryDetailPage'
 import { CategoryListPage } from './merchant/categories/CategoryListPage'
@@ -124,6 +125,8 @@ function App() {
 
               <Route path=":storeId/customers" element={<CustomerListPage />} />
               <Route path=":storeId/customers/:customerId" element={<CustomerDetailPage />} />
+
+              <Route path=":storeId/analytics" element={<AnalyticsPage />} />
             </Route>
           </Route>
 
