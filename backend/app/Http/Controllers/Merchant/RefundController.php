@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Merchant;
 
+use App\Enums\OrderStatus;
 use App\Exceptions\ActiveRefundExistsException;
 use App\Exceptions\RefundNotEligibleException;
 use App\Http\Controllers\Controller;
@@ -28,9 +29,22 @@ use Stripe\Exception\InvalidRequestException;
  * codebase has no global exception-to-status mapping. RefundService owns
  * the entire transactional/concurrency-sensitive sequence; this
  * controller only translates its outcomes.
+ *
+ * The expiry-sweep late-success compensation case (approved design,
+ * "Refund architecture" §7) reuses this single endpoint rather than
+ * exposing a second one — isExpirySweepLateSuccessCase() below picks
+ * which RefundService entry point applies, based only on the order's own
+ * already-public status/status_reason, matching exactly what
+ * OrderDetailPage's frontend eligibility check already computes. Both
+ * target methods independently re-verify their own eligibility under
+ * their own row lock regardless of what this cheap pre-check decided, so
+ * a stale/racing read here can never cause a wrong mutation — only a
+ * wrong-method call that the target method itself would then reject.
  */
 class RefundController extends Controller
 {
+    private const EXPIRY_SWEEP_ALARM_REASON = 'payment_succeeded_after_expiry_cancellation';
+
     public function __construct(
         private readonly RefundService $refundService,
     ) {}
@@ -45,12 +59,19 @@ class RefundController extends Controller
         $data = $request->validated();
 
         try {
-            $result = $this->refundService->refund(
-                $order,
-                $data['reason'] ?? null,
-                $data['idempotency_key'],
-                $context->user,
-            );
+            $result = $this->isExpirySweepLateSuccessCase($order)
+                ? $this->refundService->refundLateSucceededExpiredPayment(
+                    $order,
+                    $data['reason'] ?? null,
+                    $data['idempotency_key'],
+                    $context->user,
+                )
+                : $this->refundService->refund(
+                    $order,
+                    $data['reason'] ?? null,
+                    $data['idempotency_key'],
+                    $context->user,
+                );
         } catch (RefundNotEligibleException $e) {
             abort(422, $e->getMessage());
         } catch (ActiveRefundExistsException $e) {
@@ -81,6 +102,19 @@ class RefundController extends Controller
         return (new RefundResource($result['refund']))
             ->response()
             ->setStatusCode($result['is_new'] ? 201 : 200);
+    }
+
+    /**
+     * A cheap, non-authoritative pre-check — RefundService's own two
+     * methods each independently re-verify their full eligibility
+     * (including this exact status/status_reason pair) under a fresh
+     * row-locked read, so this only decides which method to call, never
+     * whether the request succeeds.
+     */
+    private function isExpirySweepLateSuccessCase(Order $order): bool
+    {
+        return $order->status === OrderStatus::Cancelled
+            && $order->status_reason === self::EXPIRY_SWEEP_ALARM_REASON;
     }
 
     /**

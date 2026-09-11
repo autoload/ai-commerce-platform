@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom'
 import { ApiError } from '../../services/apiClient'
 import {
   PAYMENT_SUCCEEDED_AFTER_CLOSURE_REASON,
+  PAYMENT_SUCCEEDED_AFTER_EXPIRY_CANCELLATION_REASON,
   REFUNDABLE_ORDER_STATUSES,
   type MerchantOrderStatus,
   type OrderStatus,
@@ -95,7 +96,16 @@ export function OrderDetailPage() {
   // own RefundService.isRefundableOrderState() remains fully authoritative
   // regardless of what this computes.
   const isG3bEligible = order.status === 'cancelled' && order.status_reason === PAYMENT_SUCCEEDED_AFTER_CLOSURE_REASON
-  const canRefund = canManage && (REFUNDABLE_ORDER_STATUSES.includes(order.status) || isG3bEligible)
+  // Expiry-sweep late-success compensation — a distinct, separate carve-out
+  // from isG3bEligible above. The backend's RefundController dispatches to
+  // a different RefundService method for this case (Payment stays
+  // `canceled` even after Stripe reported success), but the frontend
+  // button/confirmation flow is the same single action either way — the
+  // backend remains fully authoritative regardless of what this computes.
+  const isExpirySweepCompensationEligible =
+    order.status === 'cancelled' && order.status_reason === PAYMENT_SUCCEEDED_AFTER_EXPIRY_CANCELLATION_REASON
+  const canRefund =
+    canManage && (REFUNDABLE_ORDER_STATUSES.includes(order.status) || isG3bEligible || isExpirySweepCompensationEligible)
 
   async function handleTransition(target: MerchantOrderStatus) {
     try {
@@ -199,6 +209,12 @@ export function OrderDetailPage() {
                 <>
                   This order was cancelled, but the payment succeeded. Refunding will return{' '}
                   <strong>${order.total}</strong> to the customer via Stripe. The order will remain cancelled.
+                </>
+              ) : isExpirySweepCompensationEligible ? (
+                <>
+                  This order was cancelled after the payment window expired, but Stripe reports the payment later
+                  succeeded. Refunding will return <strong>${order.total}</strong> to the customer via Stripe. The
+                  order will remain cancelled.
                 </>
               ) : (
                 <>

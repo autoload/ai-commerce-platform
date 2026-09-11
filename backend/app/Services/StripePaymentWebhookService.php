@@ -121,6 +121,21 @@ class StripePaymentWebhookService
      */
     private const PAYMENT_SUCCEEDED_AFTER_EXPIRY_CANCELLATION_REASON = 'payment_succeeded_after_expiry_cancellation';
 
+    /**
+     * The "resolved" counterpart to PAYMENT_SUCCEEDED_AFTER_EXPIRY_CANCELLATION_REASON
+     * above — mirrors PAYMENT_REFUNDED_AFTER_CLOSURE_REASON's exact role for
+     * the G3-A/G3-B pairing. Written only when the admin-triggered
+     * compensating refund (RefundService::refundLateSucceededExpiredPayment(),
+     * never automatic — approved design explicitly rejects a synchronous
+     * Stripe call from this webhook) actually reaches Succeeded; see
+     * transitionOrderToRefunded()'s branch below. Deliberately distinct
+     * from PAYMENT_REFUNDED_AFTER_CLOSURE_REASON: that value's established
+     * meaning implies the case came from a locally Succeeded Payment
+     * (G3-A/G3-B), never true here — Payment.status stays Canceled through
+     * this entire flow, both before and after the compensating refund.
+     */
+    private const PAYMENT_REFUNDED_AFTER_EXPIRY_CANCELLATION_REASON = 'payment_refunded_after_expiry_cancellation';
+
     public function __construct(
         private readonly InventoryAdjustmentService $inventoryAdjustmentService,
     ) {}
@@ -330,6 +345,22 @@ class StripePaymentWebhookService
                 $order->save();
 
                 Log::info('G3-B compensation refund succeeded — order remains cancelled, status_reason resolved.', [
+                    'order_id' => $order->id,
+                    'refund_id' => $refund->id,
+                    'payment_id' => $refund->payment_id,
+                    'store_id' => $order->store_id,
+                    'organization_id' => $order->organization_id,
+                ]);
+
+                return;
+            }
+
+            if ($order->status === OrderStatus::Cancelled
+                && $order->status_reason === self::PAYMENT_SUCCEEDED_AFTER_EXPIRY_CANCELLATION_REASON) {
+                $order->status_reason = self::PAYMENT_REFUNDED_AFTER_EXPIRY_CANCELLATION_REASON;
+                $order->save();
+
+                Log::info('Expiry-sweep late-success compensation refund succeeded — order remains cancelled, status_reason resolved.', [
                     'order_id' => $order->id,
                     'refund_id' => $refund->id,
                     'payment_id' => $refund->payment_id,

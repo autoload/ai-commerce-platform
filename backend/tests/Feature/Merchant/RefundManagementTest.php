@@ -92,6 +92,79 @@ class RefundManagementTest extends TestCase
         return ['order' => $order->fresh(), 'payment' => $payment->fresh(), 'variant' => $variant, 'store' => $store];
     }
 
+    /**
+     * Builds an expiry-sweep-late-success-eligible Order: a real checkout
+     * (real Checkout-reason claims via the unmodified
+     * CheckoutOrderCreationService), then simulates the sweep-then-
+     * late-succeed sequence directly — the same "isolate the transition
+     * under test" discipline the G3-B fixtures in StripeRefundWebhookTest
+     * already establish, rather than depending on
+     * PaymentExpirySweepService's own live Stripe-retrieve() guard here.
+     * Inventory is genuinely released (Release-reason rows), exactly as
+     * PaymentExpirySweepService::releaseInventoryForPayment() would, so
+     * this file's tests exercise the real "already released" state
+     * restoreInventoryForRefund()'s guard depends on.
+     *
+     * @return array{order: Order, payment: Payment, variant: ProductVariant, store: Store}
+     */
+    private function expirySweepLateSuccessFixture(Organization $org, Store $store, int $stock = 10, float $price = 20.00, int $quantity = 2): array
+    {
+        $customer = Customer::factory()->forStore($store)->create();
+        $product = Product::factory()->forStore($store)->create();
+        $variant = ProductVariant::factory()->forProduct($product)->create([
+            'price' => $price,
+            'status' => CatalogStatus::Active,
+        ]);
+
+        app(InventoryAdjustmentService::class)->adjust(
+            $variant, $stock, InventoryTransactionReason::Restock, null, null
+        );
+
+        $stripePaymentIntentId = 'pi_test_'.Str::random(24);
+
+        $order = app(CheckoutOrderCreationService::class)->createPendingOrder(
+            $customer,
+            $store,
+            [['variant' => $variant, 'quantity' => $quantity]],
+            [
+                'recipient_name' => 'Jane Doe',
+                'line1' => '123 Main St',
+                'city' => 'Springfield',
+                'state' => 'IL',
+                'postal_code' => '62701',
+                'country' => 'US',
+            ],
+            $stripePaymentIntentId,
+        );
+
+        $payment = $order->payments->first();
+
+        // The expiry sweep's own cancellation: release every claim, then
+        // mark the Payment Canceled/'expired'.
+        foreach ($order->items as $item) {
+            app(InventoryAdjustmentService::class)->adjust(
+                $item->variant, $item->quantity, InventoryTransactionReason::Release, null, null, $item, $payment
+            );
+        }
+
+        $payment->status = PaymentStatus::Canceled;
+        $payment->failure_reason = 'expired';
+        $payment->save();
+
+        $order->status = OrderStatus::Cancelled;
+        $order->status_reason = 'expired';
+        $order->cancelled_at = now();
+        $order->save();
+
+        // The late webhook succeeding — mirrors
+        // StripePaymentWebhookService::recordLatePaymentSucceededAfterExpirySweep()'s
+        // real behavior exactly: Payment.status is deliberately NOT touched.
+        $order->status_reason = 'payment_succeeded_after_expiry_cancellation';
+        $order->save();
+
+        return ['order' => $order->fresh(), 'payment' => $payment->fresh(), 'variant' => $variant, 'store' => $store];
+    }
+
     // ---- Success paths --------------------------------------------------
 
     public function test_owner_can_refund_a_paid_order(): void
@@ -429,6 +502,282 @@ class RefundManagementTest extends TestCase
 
         $response = $this->withToken($token)->postJson(
             "/api/stores/{$store->id}/orders/{$order->id}/refund",
+            ['idempotency_key' => 'refund-key-1']
+        );
+
+        $response->assertStatus(422);
+        $this->assertDatabaseCount('refunds', 0);
+    }
+
+    // ---- Expiry-sweep late-success compensation ----------------------------
+
+    /**
+     * The dedicated RefundService::refundLateSucceededExpiredPayment() path
+     * — dispatched via the same POST endpoint as every other refund, per
+     * the approved "reuse the existing endpoint" design. Distinct from the
+     * G3-B tests above: Payment.status here is Canceled, not Succeeded, and
+     * must remain so after this call (this method never touches it).
+     */
+    public function test_owner_can_refund_an_expiry_sweep_late_success_order(): void
+    {
+        $fake = $this->fakeGateway();
+        $org = $this->activeOrganization();
+        $owner = $this->memberWithRole($org, OrganizationRole::Owner);
+        $store = Store::factory()->forOrganization($org)->create();
+        $fixture = $this->expirySweepLateSuccessFixture($org, $store, quantity: 2, price: 20.00);
+        $token = $owner->createToken('t')->plainTextToken;
+
+        $response = $this->withToken($token)->postJson(
+            "/api/stores/{$store->id}/orders/{$fixture['order']->id}/refund",
+            ['idempotency_key' => 'refund-key-1', 'reason' => 'Late payment after expiry']
+        );
+
+        $response->assertCreated()
+            ->assertJsonPath('data.order_id', $fixture['order']->id)
+            ->assertJsonPath('data.payment_id', $fixture['payment']->id)
+            ->assertJsonPath('data.amount', $fixture['payment']->amount)
+            ->assertJsonPath('data.status', 'pending');
+
+        $this->assertDatabaseHas('refunds', [
+            'order_id' => $fixture['order']->id,
+            'payment_id' => $fixture['payment']->id,
+            'status' => 'pending',
+        ]);
+
+        // Order/Payment are NOT touched synchronously by this call — the
+        // refund.updated webhook is the sole authority for resolving
+        // status_reason, exactly as G3-B's own refund() call behaves.
+        $order = $fixture['order']->fresh();
+        $this->assertSame(OrderStatus::Cancelled, $order->status);
+        $this->assertSame('payment_succeeded_after_expiry_cancellation', $order->status_reason);
+        $payment = $fixture['payment']->fresh();
+        $this->assertSame(PaymentStatus::Canceled, $payment->status);
+        $this->assertSame('expired', $payment->failure_reason);
+
+        $this->assertCount(1, $fake->calls);
+        $this->assertSame($fixture['payment']->stripe_payment_intent_id, $fake->calls[0]['params']['payment_intent']);
+        $this->assertSame((int) round($fixture['payment']->amount * 100), $fake->calls[0]['params']['amount']);
+        $this->assertSame(
+            hash('sha256', "refund:{$fixture['payment']->id}:refund-key-1"),
+            $fake->calls[0]['idempotency_key']
+        );
+    }
+
+    public function test_store_admin_can_refund_an_expiry_sweep_late_success_order(): void
+    {
+        $this->fakeGateway();
+        $org = $this->activeOrganization();
+        $storeAdmin = $this->memberWithRole($org, OrganizationRole::StoreAdmin);
+        $store = Store::factory()->forOrganization($org)->create();
+        $this->attachToStore($storeAdmin, $store);
+        $fixture = $this->expirySweepLateSuccessFixture($org, $store);
+        $token = $storeAdmin->createToken('t')->plainTextToken;
+
+        $response = $this->withToken($token)->postJson(
+            "/api/stores/{$store->id}/orders/{$fixture['order']->id}/refund",
+            ['idempotency_key' => 'refund-key-1']
+        );
+
+        $response->assertCreated();
+    }
+
+    public function test_staff_cannot_refund_an_expiry_sweep_late_success_order(): void
+    {
+        $this->fakeGateway();
+        $org = $this->activeOrganization();
+        $staff = $this->memberWithRole($org, OrganizationRole::Staff);
+        $store = Store::factory()->forOrganization($org)->create();
+        $this->attachToStore($staff, $store);
+        $fixture = $this->expirySweepLateSuccessFixture($org, $store);
+        $token = $staff->createToken('t')->plainTextToken;
+
+        $response = $this->withToken($token)->postJson(
+            "/api/stores/{$store->id}/orders/{$fixture['order']->id}/refund",
+            ['idempotency_key' => 'refund-key-1']
+        );
+
+        $response->assertStatus(403);
+        $this->assertDatabaseCount('refunds', 0);
+    }
+
+    /**
+     * A Cancelled order still only carrying the sweep's own 'expired'
+     * status_reason (the late webhook hasn't landed yet) must not be
+     * routed to this compensation path — it falls through to the ordinary
+     * refund() eligibility check, which also rejects it (Cancelled is not
+     * in REFUNDABLE_ORDER_STATUSES and 'expired' is not the G3-B alarm).
+     */
+    public function test_plain_expired_order_without_the_late_success_alarm_cannot_be_refunded(): void
+    {
+        $this->fakeGateway();
+        $org = $this->activeOrganization();
+        $owner = $this->memberWithRole($org, OrganizationRole::Owner);
+        $store = Store::factory()->forOrganization($org)->create();
+        $order = Order::factory()->forStore($store)->create();
+        $order->status = OrderStatus::Cancelled;
+        $order->status_reason = 'expired';
+        $order->save();
+        $payment = Payment::factory()->forOrder($order)->create();
+        $payment->status = PaymentStatus::Canceled;
+        $payment->failure_reason = 'expired';
+        $payment->save();
+        $token = $owner->createToken('t')->plainTextToken;
+
+        $response = $this->withToken($token)->postJson(
+            "/api/stores/{$store->id}/orders/{$order->id}/refund",
+            ['idempotency_key' => 'refund-key-1']
+        );
+
+        $response->assertStatus(422);
+        $this->assertDatabaseCount('refunds', 0);
+    }
+
+    /**
+     * Proves the new method independently re-verifies the Payment side,
+     * not just Order.status_reason: an order carrying the alarm value but
+     * with no matching Canceled+'expired' Payment row must still be
+     * rejected.
+     */
+    public function test_expiry_sweep_late_success_order_with_no_matching_payment_cannot_be_refunded(): void
+    {
+        $this->fakeGateway();
+        $org = $this->activeOrganization();
+        $owner = $this->memberWithRole($org, OrganizationRole::Owner);
+        $store = Store::factory()->forOrganization($org)->create();
+        $order = Order::factory()->forStore($store)->create();
+        $order->status = OrderStatus::Cancelled;
+        $order->status_reason = 'payment_succeeded_after_expiry_cancellation';
+        $order->save();
+        // No Payment row at all for this order.
+        $token = $owner->createToken('t')->plainTextToken;
+
+        $response = $this->withToken($token)->postJson(
+            "/api/stores/{$store->id}/orders/{$order->id}/refund",
+            ['idempotency_key' => 'refund-key-1']
+        );
+
+        $response->assertStatus(422);
+        $this->assertDatabaseCount('refunds', 0);
+    }
+
+    /**
+     * Same idea, opposite angle: a Payment that is Canceled but with a
+     * DIFFERENT failure_reason (a genuine Stripe-reported cancellation,
+     * not the sweep's own literal) must not be treated as eligible.
+     */
+    public function test_expiry_sweep_late_success_order_with_non_expiry_failure_reason_cannot_be_refunded(): void
+    {
+        $this->fakeGateway();
+        $org = $this->activeOrganization();
+        $owner = $this->memberWithRole($org, OrganizationRole::Owner);
+        $store = Store::factory()->forOrganization($org)->create();
+        $order = Order::factory()->forStore($store)->create();
+        $order->status = OrderStatus::Cancelled;
+        $order->status_reason = 'payment_succeeded_after_expiry_cancellation';
+        $order->save();
+        $payment = Payment::factory()->forOrder($order)->create();
+        $payment->status = PaymentStatus::Canceled;
+        $payment->failure_reason = 'card_declined';
+        $payment->save();
+        $token = $owner->createToken('t')->plainTextToken;
+
+        $response = $this->withToken($token)->postJson(
+            "/api/stores/{$store->id}/orders/{$order->id}/refund",
+            ['idempotency_key' => 'refund-key-1']
+        );
+
+        $response->assertStatus(422);
+        $this->assertDatabaseCount('refunds', 0);
+    }
+
+    public function test_already_resolved_expiry_sweep_order_cannot_be_refunded_again(): void
+    {
+        $fake = $this->fakeGateway();
+        $org = $this->activeOrganization();
+        $owner = $this->memberWithRole($org, OrganizationRole::Owner);
+        $store = Store::factory()->forOrganization($org)->create();
+        $fixture = $this->expirySweepLateSuccessFixture($org, $store);
+        $order = $fixture['order'];
+        // Simulates the refund.updated webhook having already resolved this.
+        $order->status_reason = 'payment_refunded_after_expiry_cancellation';
+        $order->save();
+        $token = $owner->createToken('t')->plainTextToken;
+
+        $response = $this->withToken($token)->postJson(
+            "/api/stores/{$store->id}/orders/{$order->id}/refund",
+            ['idempotency_key' => 'refund-key-1']
+        );
+
+        $response->assertStatus(422);
+        $this->assertDatabaseCount('refunds', 0);
+        $this->assertCount(0, $fake->calls);
+    }
+
+    public function test_existing_active_refund_for_expiry_sweep_case_is_rejected_with_409(): void
+    {
+        $fake = $this->fakeGateway();
+        $org = $this->activeOrganization();
+        $owner = $this->memberWithRole($org, OrganizationRole::Owner);
+        $store = Store::factory()->forOrganization($org)->create();
+        $fixture = $this->expirySweepLateSuccessFixture($org, $store);
+        $token = $owner->createToken('t')->plainTextToken;
+
+        $this->withToken($token)->postJson(
+            "/api/stores/{$store->id}/orders/{$fixture['order']->id}/refund",
+            ['idempotency_key' => 'refund-key-1']
+        )->assertCreated();
+
+        $response = $this->withToken($token)->postJson(
+            "/api/stores/{$store->id}/orders/{$fixture['order']->id}/refund",
+            ['idempotency_key' => 'refund-key-2']
+        );
+
+        $response->assertStatus(409);
+        $this->assertDatabaseCount('refunds', 1);
+        $this->assertCount(1, $fake->calls);
+    }
+
+    public function test_generic_stripe_api_failure_for_expiry_sweep_case_is_mapped_to_502(): void
+    {
+        $fake = $this->fakeGateway();
+        $org = $this->activeOrganization();
+        $owner = $this->memberWithRole($org, OrganizationRole::Owner);
+        $store = Store::factory()->forOrganization($org)->create();
+        $fixture = $this->expirySweepLateSuccessFixture($org, $store);
+        $token = $owner->createToken('t')->plainTextToken;
+
+        $fake->willThrow(ApiConnectionException::factory('Could not connect to Stripe over the internal test network.'));
+
+        $response = $this->withToken($token)->postJson(
+            "/api/stores/{$store->id}/orders/{$fixture['order']->id}/refund",
+            ['idempotency_key' => 'refund-key-1']
+        );
+
+        $response->assertStatus(502);
+        $this->assertDatabaseCount('refunds', 0);
+        // No local state change beyond what already existed — the alarm
+        // remains unresolved and retryable.
+        $order = $fixture['order']->fresh();
+        $this->assertSame('payment_succeeded_after_expiry_cancellation', $order->status_reason);
+        $this->assertSame(PaymentStatus::Canceled, $fixture['payment']->fresh()->status);
+    }
+
+    public function test_stripe_already_refunded_response_for_expiry_sweep_case_is_mapped_to_a_clean_422(): void
+    {
+        $fake = $this->fakeGateway();
+        $org = $this->activeOrganization();
+        $owner = $this->memberWithRole($org, OrganizationRole::Owner);
+        $store = Store::factory()->forOrganization($org)->create();
+        $fixture = $this->expirySweepLateSuccessFixture($org, $store);
+        $token = $owner->createToken('t')->plainTextToken;
+
+        $fake->willThrow(InvalidRequestException::factory(
+            'Charge ch_test has already been refunded.',
+            400,
+        ));
+
+        $response = $this->withToken($token)->postJson(
+            "/api/stores/{$store->id}/orders/{$fixture['order']->id}/refund",
             ['idempotency_key' => 'refund-key-1']
         );
 

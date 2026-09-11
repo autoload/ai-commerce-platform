@@ -77,6 +77,15 @@ export const REFUNDABLE_ORDER_STATUSES: OrderStatus[] = ['paid', 'processing', '
  */
 export const PAYMENT_SUCCEEDED_AFTER_CLOSURE_REASON = 'payment_succeeded_after_closure'
 
+/**
+ * Expiry-sweep late-success compensation — mirrors the backend's exact
+ * literal (StripePaymentWebhookService::PAYMENT_SUCCEEDED_AFTER_EXPIRY_CANCELLATION_REASON /
+ * RefundService::EXPIRY_SWEEP_ALARM_REASON). A distinct, separate carve-out
+ * from PAYMENT_SUCCEEDED_AFTER_CLOSURE_REASON above — this order's Payment
+ * stays `canceled` even after Stripe reported success, unlike the G3-B case.
+ */
+export const PAYMENT_SUCCEEDED_AFTER_EXPIRY_CANCELLATION_REASON = 'payment_succeeded_after_expiry_cancellation'
+
 type OrderListMeta = {
   current_page: number
   last_page: number

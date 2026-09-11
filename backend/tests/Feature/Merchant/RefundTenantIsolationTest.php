@@ -73,6 +73,60 @@ class RefundTenantIsolationTest extends TestCase
         return $order->fresh();
     }
 
+    /**
+     * Same isolated-construction discipline as
+     * RefundManagementTest::expirySweepLateSuccessFixture() — a real
+     * checkout, then the sweep-then-late-succeed sequence constructed
+     * directly.
+     */
+    private function expirySweepLateSuccessOrder(Organization $org, Store $store): Order
+    {
+        $customer = Customer::factory()->forStore($store)->create();
+        $product = Product::factory()->forStore($store)->create();
+        $variant = ProductVariant::factory()->forProduct($product)->create([
+            'price' => 20.00,
+            'status' => CatalogStatus::Active,
+        ]);
+
+        app(InventoryAdjustmentService::class)->adjust(
+            $variant, 10, InventoryTransactionReason::Restock, null, null
+        );
+
+        $order = app(CheckoutOrderCreationService::class)->createPendingOrder(
+            $customer,
+            $store,
+            [['variant' => $variant, 'quantity' => 1]],
+            [
+                'recipient_name' => 'Jane Doe',
+                'line1' => '123 Main St',
+                'city' => 'Springfield',
+                'state' => 'IL',
+                'postal_code' => '62701',
+                'country' => 'US',
+            ],
+            'pi_test_'.Str::random(24),
+        );
+
+        $payment = $order->payments->first();
+
+        foreach ($order->items as $item) {
+            app(InventoryAdjustmentService::class)->adjust(
+                $item->variant, $item->quantity, InventoryTransactionReason::Release, null, null, $item, $payment
+            );
+        }
+
+        $payment->status = PaymentStatus::Canceled;
+        $payment->failure_reason = 'expired';
+        $payment->save();
+
+        $order->status = OrderStatus::Cancelled;
+        $order->status_reason = 'payment_succeeded_after_expiry_cancellation';
+        $order->cancelled_at = now();
+        $order->save();
+
+        return $order->fresh();
+    }
+
     public function test_a_refund_cannot_be_initiated_against_an_order_from_another_organization(): void
     {
         $this->fakeGateway();
@@ -169,5 +223,41 @@ class RefundTenantIsolationTest extends TestCase
             "/api/stores/{$store->id}/orders/{$order->id}/refund",
             ['idempotency_key' => 'refund-key-1']
         )->assertStatus(401);
+    }
+
+    // ---- Expiry-sweep late-success compensation ----------------------------
+
+    public function test_expiry_sweep_late_success_refund_cannot_be_initiated_against_an_order_from_another_organization(): void
+    {
+        $this->fakeGateway();
+        $orgA = $this->activeOrganization();
+        $ownerA = $this->memberWithRole($orgA, OrganizationRole::Owner);
+        $storeA = Store::factory()->forOrganization($orgA)->create();
+        $orgB = $this->activeOrganization();
+        $storeB = Store::factory()->forOrganization($orgB)->create();
+        $orderInB = $this->expirySweepLateSuccessOrder($orgB, $storeB);
+        $token = $ownerA->createToken('t')->plainTextToken;
+
+        $this->withToken($token)->postJson(
+            "/api/stores/{$storeA->id}/orders/{$orderInB->id}/refund",
+            ['idempotency_key' => 'refund-key-1']
+        )->assertStatus(404);
+
+        $this->assertDatabaseCount('refunds', 0);
+    }
+
+    public function test_expiry_sweep_late_success_refund_respects_store_assignment_within_the_same_organization(): void
+    {
+        $this->fakeGateway();
+        $org = $this->activeOrganization();
+        $storeAdmin = $this->memberWithRole($org, OrganizationRole::StoreAdmin);
+        $unassignedStore = Store::factory()->forOrganization($org)->create();
+        $order = $this->expirySweepLateSuccessOrder($org, $unassignedStore);
+        $token = $storeAdmin->createToken('t')->plainTextToken;
+
+        $this->withToken($token)->postJson(
+            "/api/stores/{$unassignedStore->id}/orders/{$order->id}/refund",
+            ['idempotency_key' => 'refund-key-1']
+        )->assertStatus(403);
     }
 }

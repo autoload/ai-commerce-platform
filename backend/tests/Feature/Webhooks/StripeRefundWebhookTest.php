@@ -957,4 +957,265 @@ class StripeRefundWebhookTest extends TestCase
         $this->expectException(RefundNotEligibleException::class);
         app(RefundService::class)->refund($order, null, '9e3-e2e-key', null);
     }
+
+    // -----------------------------------------------------------------
+    // Expiry-sweep late-success compensation refund
+    // -----------------------------------------------------------------
+
+    /**
+     * Builds an expiry-sweep-late-success-eligible Order the same isolated
+     * way cancelledAfterClosureFixture() does for the G3-B case above —
+     * real checkout claims, then the sweep-then-late-succeed sequence
+     * constructed directly (that transition is StripeWebhookTest's own
+     * scope, and is exercised end to end, not constructed, by
+     * test_expiry_sweep_compensation_end_to_end() below).
+     *
+     * @param  array<int, array{stock: int, price: float, quantity: int}>  $items
+     * @return array{order: Order, payment: Payment, variants: array<int, ProductVariant>, stripePaymentIntentId: string}
+     */
+    private function expirySweepLateSuccessFixture(array $items): array
+    {
+        $org = $this->activeOrganization();
+        $store = Store::factory()->forOrganization($org)->create();
+        $customer = Customer::factory()->forStore($store)->create();
+
+        $lineItems = [];
+        $variants = [];
+
+        foreach ($items as $spec) {
+            $product = Product::factory()->forStore($store)->create();
+            $variant = ProductVariant::factory()->forProduct($product)->create([
+                'price' => $spec['price'],
+                'status' => CatalogStatus::Active,
+            ]);
+
+            app(InventoryAdjustmentService::class)->adjust(
+                $variant, $spec['stock'], InventoryTransactionReason::Restock, null, null
+            );
+
+            $lineItems[] = ['variant' => $variant, 'quantity' => $spec['quantity']];
+            $variants[] = $variant;
+        }
+
+        $stripePaymentIntentId = 'pi_test_'.Str::random(24);
+
+        $order = app(CheckoutOrderCreationService::class)->createPendingOrder(
+            $customer,
+            $store,
+            $lineItems,
+            [
+                'recipient_name' => 'Jane Doe',
+                'line1' => '123 Main St',
+                'city' => 'Springfield',
+                'state' => 'IL',
+                'postal_code' => '62701',
+                'country' => 'US',
+            ],
+            $stripePaymentIntentId,
+        );
+
+        $payment = $order->payments->first();
+
+        foreach ($order->items as $item) {
+            app(InventoryAdjustmentService::class)->adjust(
+                $item->variant, $item->quantity, InventoryTransactionReason::Release, null, null, $item, $payment
+            );
+        }
+
+        $payment->status = PaymentStatus::Canceled;
+        $payment->failure_reason = 'expired';
+        $payment->save();
+
+        $order->status = OrderStatus::Cancelled;
+        $order->status_reason = 'expired';
+        $order->cancelled_at = now();
+        $order->save();
+
+        // The late webhook succeeding — mirrors
+        // StripePaymentWebhookService::recordLatePaymentSucceededAfterExpirySweep()'s
+        // real behavior exactly: Payment.status is deliberately NOT touched.
+        $order->status_reason = 'payment_succeeded_after_expiry_cancellation';
+        $order->save();
+
+        return [
+            'order' => $order->fresh(),
+            'payment' => $payment->fresh(),
+            'variants' => $variants,
+            'stripePaymentIntentId' => $stripePaymentIntentId,
+        ];
+    }
+
+    public function test_expiry_sweep_compensation_refund_resolves_status_reason_and_does_not_double_credit_inventory(): void
+    {
+        $fixture = $this->expirySweepLateSuccessFixture([['stock' => 10, 'price' => 20.00, 'quantity' => 2]]);
+        $variant = $fixture['variants'][0];
+        $refundId = 're_test_'.Str::random(16);
+
+        $onHandBefore = Inventory::where('product_variant_id', $variant->id)->first()->quantity_on_hand;
+        $ledgerCountBefore = InventoryTransaction::count();
+
+        $payload = $this->buildRefundEventPayload(
+            'evt_expiry_compensation_1', 'refund.created', $fixture['stripePaymentIntentId'], $refundId, 'succeeded', 4000
+        );
+
+        $response = $this->postWebhook($payload);
+
+        $response->assertOk();
+        $this->assertDatabaseHas('refunds', ['stripe_refund_id' => $refundId, 'status' => 'succeeded']);
+
+        // Inventory was already fully returned by the sweep's own Release —
+        // the refund must NOT credit it a second time.
+        $this->assertSame($onHandBefore, Inventory::where('product_variant_id', $variant->id)->first()->quantity_on_hand);
+        $this->assertSame($ledgerCountBefore, InventoryTransaction::count());
+        $this->assertDatabaseMissing('inventory_transactions', [
+            'payment_id' => $fixture['payment']->id,
+            'reason' => 'refund',
+        ]);
+
+        // Order stays Cancelled, Payment stays Canceled — only status_reason resolves.
+        $order = $fixture['order']->fresh();
+        $payment = $fixture['payment']->fresh();
+        $this->assertSame(OrderStatus::Cancelled, $order->status);
+        $this->assertSame('payment_refunded_after_expiry_cancellation', $order->status_reason);
+        $this->assertSame(PaymentStatus::Canceled, $payment->status);
+        $this->assertSame('expired', $payment->failure_reason);
+    }
+
+    public function test_expiry_sweep_compensation_duplicate_webhook_does_not_double_credit_or_re_resolve(): void
+    {
+        $fixture = $this->expirySweepLateSuccessFixture([['stock' => 10, 'price' => 20.00, 'quantity' => 2]]);
+        $variant = $fixture['variants'][0];
+        $refundId = 're_test_'.Str::random(16);
+
+        $this->postWebhook($this->buildRefundEventPayload(
+            'evt_expiry_dup_1', 'refund.created', $fixture['stripePaymentIntentId'], $refundId, 'succeeded', 4000
+        ))->assertOk();
+
+        $onHandAfterFirst = Inventory::where('product_variant_id', $variant->id)->first()->quantity_on_hand;
+        $ledgerCountAfterFirst = InventoryTransaction::count();
+
+        // A different event id redelivering the same already-succeeded refund.
+        $response = $this->postWebhook($this->buildRefundEventPayload(
+            'evt_expiry_dup_2', 'refund.updated', $fixture['stripePaymentIntentId'], $refundId, 'succeeded', 4000
+        ));
+
+        $response->assertOk();
+        $this->assertSame($onHandAfterFirst, Inventory::where('product_variant_id', $variant->id)->first()->quantity_on_hand);
+        $this->assertSame($ledgerCountAfterFirst, InventoryTransaction::count());
+        $this->assertSame('payment_refunded_after_expiry_cancellation', $fixture['order']->fresh()->status_reason);
+        $this->assertSame(PaymentStatus::Canceled, $fixture['payment']->fresh()->status);
+    }
+
+    /**
+     * The full realistic chain, end to end, with no constructed
+     * intermediate state: real checkout -> real expiry sweep -> real late
+     * payment_intent.succeeded webhook (9E-3 detection, already proven in
+     * isolation by test_9e3_end_to_end_expiry_sweep_late_payment_detection
+     * above) -> a real admin-initiated compensating refund through
+     * RefundService::refundLateSucceededExpiredPayment() (the same method
+     * RefundController dispatches to) -> a real refund.updated succeeded
+     * webhook resolving it.
+     */
+    public function test_expiry_sweep_compensation_end_to_end(): void
+    {
+        config(['services.stripe.checkout_expiry_minutes' => 30]);
+        $this->app->instance(StripePaymentIntentGateway::class, new FakePaymentIntentGateway);
+
+        $org = $this->activeOrganization();
+        $store = Store::factory()->forOrganization($org)->create();
+        $customer = Customer::factory()->forStore($store)->create();
+        $product = Product::factory()->forStore($store)->create();
+        $variant = ProductVariant::factory()->forProduct($product)->create([
+            'price' => 20.00,
+            'status' => CatalogStatus::Active,
+        ]);
+
+        app(InventoryAdjustmentService::class)->adjust(
+            $variant, 10, InventoryTransactionReason::Restock, null, null
+        );
+
+        $stripePaymentIntentId = 'pi_test_'.Str::random(24);
+
+        $this->travelTo(now()->subMinutes(35));
+        $order = app(CheckoutOrderCreationService::class)->createPendingOrder(
+            $customer,
+            $store,
+            [['variant' => $variant, 'quantity' => 2]],
+            [
+                'recipient_name' => 'Jane Doe',
+                'line1' => '123 Main St',
+                'city' => 'Springfield',
+                'state' => 'IL',
+                'postal_code' => '62701',
+                'country' => 'US',
+            ],
+            $stripePaymentIntentId,
+        );
+        $this->travelBack();
+
+        $payment = $order->payments->first();
+
+        // Real expiry sweep — cancels the order, releases inventory, marks
+        // the Payment Canceled/'expired'.
+        app(PaymentExpirySweepService::class)->sweep();
+
+        $order->refresh();
+        $payment->refresh();
+        $this->assertSame(OrderStatus::Cancelled, $order->status);
+        $this->assertSame(PaymentStatus::Canceled, $payment->status);
+
+        // The residual race: Stripe's real PaymentIntent actually succeeds
+        // after the sweep already canceled it locally (9E-3 detection).
+        $succeededPayload = [
+            'id' => 'evt_expiry_e2e_succeeded',
+            'object' => 'event',
+            'type' => 'payment_intent.succeeded',
+            'created' => now()->timestamp,
+            'data' => [
+                'object' => [
+                    'id' => $stripePaymentIntentId,
+                    'object' => 'payment_intent',
+                    'amount' => 4000,
+                    'currency' => 'usd',
+                    'status' => 'succeeded',
+                ],
+            ],
+        ];
+        $this->postWebhook($succeededPayload)->assertOk();
+
+        $order->refresh();
+        $this->assertSame('payment_succeeded_after_expiry_cancellation', $order->status_reason);
+
+        // Admin-initiated compensating refund, through the real
+        // RefundService — the same code path RefundController dispatches to.
+        $this->fakeRefundGateway();
+        $result = app(RefundService::class)->refundLateSucceededExpiredPayment(
+            $order, 'Late payment after expiry', 'expiry-e2e-key', null
+        );
+        $refund = $result['refund'];
+        $this->assertSame('pending', $refund->status->value);
+
+        // Payment must still be Canceled right after the refund is
+        // created — this method never touches Payment.status.
+        $this->assertSame(PaymentStatus::Canceled, $payment->fresh()->status);
+
+        $refundSucceededPayload = $this->buildRefundEventPayload(
+            'evt_expiry_e2e_refund_succeeded', 'refund.updated', $stripePaymentIntentId, $refund->stripe_refund_id, 'succeeded', 4000
+        );
+        $this->postWebhook($refundSucceededPayload)->assertOk();
+
+        $order->refresh();
+        $payment->refresh();
+        $this->assertSame(OrderStatus::Cancelled, $order->status); // never reopened, never Refunded
+        $this->assertSame('payment_refunded_after_expiry_cancellation', $order->status_reason);
+        $this->assertSame(PaymentStatus::Canceled, $payment->status); // still never Succeeded
+        $this->assertDatabaseHas('refunds', ['id' => $refund->id, 'status' => 'succeeded']);
+        // Inventory was already released by the sweep — not double-credited.
+        $this->assertSame(10, Inventory::where('product_variant_id', $variant->id)->first()->quantity_on_hand);
+        $this->assertDatabaseMissing('inventory_transactions', [
+            'product_variant_id' => $variant->id,
+            'payment_id' => $payment->id,
+            'reason' => 'refund',
+        ]);
+    }
 }
