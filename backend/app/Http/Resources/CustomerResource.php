@@ -14,13 +14,17 @@ use Illuminate\Http\Resources\Json\JsonResource;
  * methods, orders, and refunds — none of those are in the approved
  * Phase 9C detail scope.
  *
- * order_count/total_spent are NOT model attributes — they are expected to
- * arrive via withCount('orders')/withSum(['orders as total_spent' => ...],
- * 'total') on the query that produced this model (CustomerController).
- * total_spent is a raw aggregate value (not routed through Order's own
- * 'decimal:2' cast), so it is explicitly formatted here to the same
- * two-decimal string shape ("0.00", "125.50") the rest of this API uses
- * for money.
+ * order_count/gross_sales_amount/sales_refunds are NOT model attributes —
+ * they are expected to arrive via withCount('orders')/withSum(['orders as
+ * gross_sales_amount' => ...], 'total')/addSelect(['sales_refunds' => ...])
+ * on the query that produced this model (CustomerController's
+ * withCustomerAggregates()). total_spent is computed here as
+ * gross_sales_amount − sales_refunds (Net Sales per customer, per
+ * App\Support\SalesClassification's authoritative "which orders count as a
+ * sale" definition) rather than exposed as a single raw aggregate — the
+ * wire field name and its "0.00"/"125.50" two-decimal string shape are
+ * unchanged for backward compatibility; only the underlying calculation
+ * changed, to stop counting a since-refunded order's amount as spend.
  *
  * @mixin Customer
  */
@@ -39,7 +43,10 @@ class CustomerResource extends JsonResource
             'phone' => $this->phone,
             'created_at' => $this->created_at?->toIso8601String(),
             'order_count' => (int) $this->orders_count,
-            'total_spent' => number_format((float) ($this->total_spent ?? 0), 2, '.', ''),
+            'total_spent' => number_format(
+                (float) ($this->gross_sales_amount ?? 0) - (float) ($this->sales_refunds ?? 0),
+                2, '.', ''
+            ),
         ];
     }
 }

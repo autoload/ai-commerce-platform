@@ -4,22 +4,32 @@ namespace Tests\Feature\Merchant;
 
 use App\Enums\OrderStatus;
 use App\Enums\OrganizationRole;
+use App\Enums\RefundStatus;
 use App\Models\Customer;
 use App\Models\Order;
+use App\Models\Payment;
+use App\Models\Refund;
 use App\Models\Store;
+use App\Support\SalesClassification;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 use Tests\Concerns\CreatesTenantFixtures;
 use Tests\TestCase;
 
 /**
- * order_count/total_spent semantics, per the approved Phase 9C design:
- * order_count counts ALL of a customer's orders regardless of status;
- * total_spent sums orders.total for every status except pending/cancelled
- * (refunded currently counts too — no merchant refund workflow exists yet
- * to make this moot in any other way). No refund-aware accounting is
- * tested here — explicitly out of scope.
+ * order_count/total_spent semantics, per the approved Phase 9C design plus
+ * the Analytics-driven cross-module consistency fix: order_count counts
+ * ALL of a customer's orders regardless of status (unchanged). total_spent
+ * is now Net Sales per customer (Gross Sales − Sales Refunds, via
+ * App\Support\SalesClassification's GROSS_SALE_STATUSES = {Paid,
+ * Processing, Shipped, Completed, Refunded}) rather than the original
+ * "every status except pending/cancelled" sum, which incorrectly kept a
+ * fully-refunded order's amount as spend. G3-B/9E-4 compensation refunds
+ * never reduce total_spent — their order is always Cancelled, never in
+ * GROSS_SALE_STATUSES, so they're structurally excluded from the
+ * sales_refunds subquery without ever checking status_reason.
  */
 class CustomerAggregatesTest extends TestCase
 {
@@ -30,6 +40,26 @@ class CustomerAggregatesTest extends TestCase
         $order->status = $status;
         $order->total = $total;
         $order->save();
+    }
+
+    /**
+     * No RefundFactory exists (Refund has no HasFactory — see Refund.php),
+     * so a succeeded Refund row is built directly here, matching the
+     * "smallest footprint" approach for this narrowly-scoped fix.
+     */
+    private function createSucceededRefund(Order $order, float $amount): Refund
+    {
+        $refund = new Refund;
+        $refund->organization_id = $order->organization_id;
+        $refund->store_id = $order->store_id;
+        $refund->order_id = $order->id;
+        $refund->payment_id = Payment::factory()->forOrder($order)->create()->id;
+        $refund->stripe_refund_id = 're_test_'.Str::random(16);
+        $refund->amount = $amount;
+        $refund->status = RefundStatus::Succeeded;
+        $refund->save();
+
+        return $refund;
     }
 
     public function test_order_count_counts_all_orders_regardless_of_status(): void
@@ -169,6 +199,179 @@ class CustomerAggregatesTest extends TestCase
         $response->assertOk()
             ->assertJsonPath('data.order_count', 2)
             ->assertJsonPath('data.total_spent', '0.00');
+    }
+
+    // ---- Net Sales (Gross Sales - Sales Refunds) --------------------------
+
+    public function test_total_spent_nets_out_a_fully_refunded_order(): void
+    {
+        $org = $this->activeOrganization();
+        $owner = $this->memberWithRole($org, OrganizationRole::Owner);
+        $store = Store::factory()->forOrganization($org)->create();
+        $customer = Customer::factory()->forStore($store)->create();
+
+        $order = Order::factory()->forCustomer($customer)->create();
+        $this->setOrderStatusAndTotal($order, OrderStatus::Refunded, 100.00);
+        $this->createSucceededRefund($order, 100.00);
+
+        $token = $owner->createToken('t')->plainTextToken;
+
+        $response = $this->withToken($token)->getJson("/api/stores/{$store->id}/customers/{$customer->id}");
+
+        $response->assertOk()
+            ->assertJsonPath('data.order_count', 1)
+            ->assertJsonPath('data.total_spent', '0.00');
+    }
+
+    /**
+     * The G3-B compensation case: a Cancelled order whose payment
+     * nonetheless later succeeded and was refunded. This order never
+     * contributed to Gross Sales (it's Cancelled, not in
+     * SalesClassification::GROSS_SALE_STATUSES), so its refund must not
+     * reduce a genuine, separate sale's total_spent.
+     */
+    public function test_total_spent_is_unaffected_by_a_g3b_compensation_refund(): void
+    {
+        $org = $this->activeOrganization();
+        $owner = $this->memberWithRole($org, OrganizationRole::Owner);
+        $store = Store::factory()->forOrganization($org)->create();
+        $customer = Customer::factory()->forStore($store)->create();
+
+        $genuineSale = Order::factory()->forCustomer($customer)->create();
+        $this->setOrderStatusAndTotal($genuineSale, OrderStatus::Paid, 100.00);
+
+        $compensated = Order::factory()->forCustomer($customer)->create();
+        $compensated->status = OrderStatus::Cancelled;
+        $compensated->status_reason = 'payment_refunded_after_closure';
+        $compensated->total = 50.00;
+        $compensated->save();
+        $this->createSucceededRefund($compensated, 50.00);
+
+        $token = $owner->createToken('t')->plainTextToken;
+
+        $response = $this->withToken($token)->getJson("/api/stores/{$store->id}/customers/{$customer->id}");
+
+        $response->assertOk()
+            ->assertJsonPath('data.order_count', 2)
+            ->assertJsonPath('data.total_spent', '100.00');
+    }
+
+    /**
+     * Same shape as the G3-B test above, for the 9E-4 expiry-sweep
+     * compensation case — a separate, distinct status_reason literal, same
+     * exclusion mechanism (order is Cancelled, never in
+     * GROSS_SALE_STATUSES).
+     */
+    public function test_total_spent_is_unaffected_by_a_9e4_compensation_refund(): void
+    {
+        $org = $this->activeOrganization();
+        $owner = $this->memberWithRole($org, OrganizationRole::Owner);
+        $store = Store::factory()->forOrganization($org)->create();
+        $customer = Customer::factory()->forStore($store)->create();
+
+        $genuineSale = Order::factory()->forCustomer($customer)->create();
+        $this->setOrderStatusAndTotal($genuineSale, OrderStatus::Paid, 100.00);
+
+        $compensated = Order::factory()->forCustomer($customer)->create();
+        $compensated->status = OrderStatus::Cancelled;
+        $compensated->status_reason = 'payment_refunded_after_expiry_cancellation';
+        $compensated->total = 50.00;
+        $compensated->save();
+        $this->createSucceededRefund($compensated, 50.00);
+
+        $token = $owner->createToken('t')->plainTextToken;
+
+        $response = $this->withToken($token)->getJson("/api/stores/{$store->id}/customers/{$customer->id}");
+
+        $response->assertOk()
+            ->assertJsonPath('data.order_count', 2)
+            ->assertJsonPath('data.total_spent', '100.00');
+    }
+
+    /**
+     * Regression proof that ordinary cancellation (no refund involved at
+     * all) is untouched by this change — both the merchant-cancellation
+     * and expiry-sweep-cancellation shapes.
+     */
+    public function test_total_spent_still_excludes_cancelled_orders_with_no_refund(): void
+    {
+        $org = $this->activeOrganization();
+        $owner = $this->memberWithRole($org, OrganizationRole::Owner);
+        $store = Store::factory()->forOrganization($org)->create();
+        $customer = Customer::factory()->forStore($store)->create();
+
+        $merchantCancelled = Order::factory()->forCustomer($customer)->create();
+        $merchantCancelled->status = OrderStatus::Cancelled;
+        $merchantCancelled->status_reason = null;
+        $merchantCancelled->total = 40.00;
+        $merchantCancelled->save();
+
+        $expirySweepCancelled = Order::factory()->forCustomer($customer)->create();
+        $expirySweepCancelled->status = OrderStatus::Cancelled;
+        $expirySweepCancelled->status_reason = 'expired';
+        $expirySweepCancelled->total = 60.00;
+        $expirySweepCancelled->save();
+
+        $token = $owner->createToken('t')->plainTextToken;
+
+        $response = $this->withToken($token)->getJson("/api/stores/{$store->id}/customers/{$customer->id}");
+
+        $response->assertOk()
+            ->assertJsonPath('data.order_count', 2)
+            ->assertJsonPath('data.total_spent', '0.00');
+    }
+
+    /**
+     * No Analytics customer-revenue endpoint exists yet — this proves
+     * CustomerController's total_spent matches an independent computation
+     * built directly from SalesClassification, standing in for what a
+     * future AnalyticsService must also produce. Once Analytics' own
+     * customer-revenue endpoint is implemented, a separate, real
+     * cross-endpoint test (total_spent from /customers/{customer} ==
+     * revenue from /analytics/customers) must be added — this test does
+     * not replace that future one.
+     */
+    public function test_total_spent_matches_an_independently_computed_net_sales_calculation(): void
+    {
+        $org = $this->activeOrganization();
+        $owner = $this->memberWithRole($org, OrganizationRole::Owner);
+        $store = Store::factory()->forOrganization($org)->create();
+        $customer = Customer::factory()->forStore($store)->create();
+
+        $genuineSale = Order::factory()->forCustomer($customer)->create();
+        $this->setOrderStatusAndTotal($genuineSale, OrderStatus::Paid, 100.00);
+
+        $refundedSale = Order::factory()->forCustomer($customer)->create();
+        $this->setOrderStatusAndTotal($refundedSale, OrderStatus::Refunded, 30.00);
+        $this->createSucceededRefund($refundedSale, 30.00);
+
+        $compensated = Order::factory()->forCustomer($customer)->create();
+        $compensated->status = OrderStatus::Cancelled;
+        $compensated->status_reason = 'payment_refunded_after_closure';
+        $compensated->total = 20.00;
+        $compensated->save();
+        $this->createSucceededRefund($compensated, 20.00);
+
+        $token = $owner->createToken('t')->plainTextToken;
+
+        $response = $this->withToken($token)->getJson("/api/stores/{$store->id}/customers/{$customer->id}");
+        $response->assertOk();
+
+        $expectedGrossSales = (float) SalesClassification::scopeGrossSaleOrders(
+            Order::where('customer_id', $customer->id)
+        )->sum('total');
+
+        $expectedSalesRefunds = (float) Refund::where('status', RefundStatus::Succeeded)
+            ->whereHas('order', function ($q) use ($customer) {
+                $q->where('customer_id', $customer->id);
+                SalesClassification::scopeGrossSaleOrders($q);
+            })
+            ->sum('amount');
+
+        $expectedNetSales = number_format($expectedGrossSales - $expectedSalesRefunds, 2, '.', '');
+
+        $this->assertSame('100.00', $expectedNetSales); // 100 (genuine) + (30 refunded - 30 its own refund) + 0 (compensation, excluded)
+        $response->assertJsonPath('data.total_spent', $expectedNetSales);
     }
 
     public function test_aggregates_are_correct_per_row_in_the_list_endpoint(): void
